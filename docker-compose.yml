@@ -1,0 +1,31 @@
+services:
+  esphome:
+    container_name: esphome
+    image: ghcr.io/esphome/esphome:2026.10
+    volumes:
+      - ./config:/config
+      - esphome-cache:/cache
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "6052:6052"
+    restart: always
+    environment:
+      - ESPHOME_USERNAME=${ESPHOME_USERNAME}
+      - ESPHOME_PASSWORD=${ESPHOME_PASSWORD}
+      # 工具链/编译缓存统一落在 /cache 卷。
+      # 镜像的 /entrypoint.sh 用 export 设置这些变量，只对其启动的 Dashboard 主进程生效；
+      # `docker compose exec` 启动的进程继承的是容器 Config.Env（即本段），拿不到 export，
+      # 会回落到 /root/.cache/esphome/...，与 Dashboard 的 /cache/... 交替写同一份
+      # CMakeCache.txt，导致 CMake 报 "source does not match the source used to generate cache"。
+      # 这里显式声明（值与 entrypoint.sh 在 /cache 存在时计算出的完全一致），两条路径即可统一。
+      - PLATFORMIO_PLATFORMS_DIR=/cache/platformio/platforms
+      - PLATFORMIO_PACKAGES_DIR=/cache/platformio/packages
+      - PLATFORMIO_CACHE_DIR=/cache/platformio/cache
+      - ESPHOME_ESP_IDF_PREFIX=/cache/idf
+      - ESPHOME_SDK_NRF_PREFIX=/cache/sdk-nrf
+      - ESPHOME_ARDUINO8266_PREFIX=/cache/arduino8266
+      - ESPHOME_HOST_PREFIX=/cache/host
+      - ESPHOME_PLATFORMIO_CCACHE_DIR=/cache/platformio-ccache
+
+volumes:
+  esphome-cache:
