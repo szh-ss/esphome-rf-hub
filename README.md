@@ -74,6 +74,22 @@ flowchart TB
 
 ---
 
+## 界面预览
+
+### 设备自带管理页（`http://<设备 IP>/`）
+
+![ESP32 首页：传感器与控制、调试日志、昇辉开关管理](docs/device-web-ui.png)
+
+> 在 ESPHome 官方 v3 首页上注入的「昇辉开关管理」区块。上排左为静态实体（沙发 8 个动作、`template fan` 6 挡滑块），右为与之等高、内部滚动且自动跟随的调试日志；中间是动态槽位列表：副码徽标、状态圆点（绿＝开 / 灰＝关）、触发 / 改名 / 添加副码 / 清除副码 / 删除；底部「最近收到的信号」显示现场抓到的帧与 RSSI，用于判断学习时收到的是开关信号还是噪声。标题右侧是中文运行时长。
+
+### Home Assistant 侧边栏「昇辉灯状态」
+
+![HA 侧边栏状态页：假状态对表与已接入小爱的开关](docs/ha-shenghui-status.png)
+
+> 左侧 8 个 `input_boolean` 是推算出来的假状态，**点击只对表、不发射 RF**；右侧 8 个 `template switch` 是接入小爱的开关，**点击会发射 RF**。两者与设备首页的状态圆点通过 `state/all`、`state/set` 双向同步，RF 无回传时首次需手动对表一次。
+
+---
+
 ## 硬件与接线
 
 主控为 ESP32-S3（`esp32-s3-devkitc-1`，Arduino 框架）。数字即 GPIO 编号：
@@ -115,6 +131,9 @@ flowchart TB
 │   ├── shenghui_mqtt.h         # MQTT Discovery + 事件 / 状态主题
 │   ├── shenghui_tab.h          # 首页接管 + /sw/api 接口
 │   └── custom_index.h          # 补丁后的官方首页（gzip 字节数组，构建产物）
+├── docs/
+│   ├── device-web-ui.png       # 设备首页截图（README「界面预览」引用）
+│   └── ha-shenghui-status.png  # HA 侧边栏状态页截图
 └── tools/
     └── gen_index.py            # 从容器内官方首页生成 custom_index.h
 ```
@@ -322,6 +341,7 @@ Lovelace 注册 `shenghui-status` /「昇辉灯状态」，指向 `shenghui_dash
 - `config/.gitignore` 里 Device Builder 生成的 `.device-builder*` 等本地状态同样不入库。
 - 迭代过程中留下的 `*.before-*` / `*.backup` 快照包含早期明文配置，已在根 `.gitignore` 里排除，提交前请确认没有误加。
 - 如果曾经把明文密码提交进过 git 历史，单纯删文件不够，应更换对应密码。
+- `docs/` 里的截图包含家庭房间命名与现场抓到的 RF 帧示例；把仓库改为公开前，请先确认这些信息是否愿意对外可见。
 
 ---
 
