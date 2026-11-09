@@ -29,21 +29,19 @@
 #include <utility>
 #include "esphome.h"
 #include "rf_admin.h"
-#include "shenghui_state.h"
 #include "custom_index.h"
 
 namespace shenghui_tab {
 
 struct Api {
-  std::function<std::string()> list;                        // 槽位状态 JSON
+  std::function<std::string()> list;                        // 槽位清单 JSON
   std::function<void(const std::string &)> add;             // 按名称分配新槽并进入学习
-  std::function<void(int)> trigger;                        // 触发指定槽位
+  std::function<void(int)> trigger;                        // 发射一次指定槽位的 RF 码
   std::function<void(int)> remove;                         // 删除指定槽位
   std::function<void(int, const std::string &)> rename;    // 命名指定槽位
   std::function<void(int)> sync;                           // 同步该槽位到 HA MQTT discovery
   std::function<void(int)> add_alias;                      // 给该槽位学习一个副码（双控）
   std::function<void(int)> remove_alias;                  // 清除该槽位的全部副码
-  std::function<void(int, bool)> set_state;               // 只对表 HA 假状态，不发射 RF
 };
 
 // JSON 字符串转义（UTF-8 中文原样保留）
@@ -78,8 +76,7 @@ inline std::string make_list() {
     if (count) out += ",";
     out += "{\"slot\":" + std::to_string(e.id);
     out += ",\"name\":\"" + json_escape(slot_store::name_of(e.id)) + "\"";
-    out += ",\"aliases\":" + std::to_string(slot_store::alias_count(e.id));
-    out += ",\"state\":\"" + std::string(rf_state::text(e.id)) + "\"}";
+    out += ",\"aliases\":" + std::to_string(slot_store::alias_count(e.id)) + "}";
     count++;
   }
   out += "],\"count\":" + std::to_string(count);
@@ -101,22 +98,6 @@ inline std::string make_list() {
     out += ",\"hex\":\"" + std::string(hd) + shenghui::frame_hex(r.frame.data()) + "\"";
     out += ",\"rssi\":" + std::string(buf);
     out += ",\"ok\":" + std::string(r.usable ? "true" : "false") + "}";
-  }
-  out += "]}";
-  return out;
-}
-
-// 状态快照：只回槽位号 + 状态，不带名称 / 副码 / 射频日志。
-// 首页已不再轮询状态，此接口保留供外部诊断与兼容既有调用。
-inline std::string make_states() {
-  std::string out = "{\"slots\":[";
-  size_t count = 0;
-  for (const auto &e : slot_store::state().entries) {
-    if (!e.recorded()) continue;
-    if (count) out += ",";
-    out += "{\"slot\":" + std::to_string(e.id);
-    out += ",\"state\":\"" + std::string(rf_state::text(e.id)) + "\"}";
-    count++;
   }
   out += "]}";
   return out;
@@ -155,8 +136,6 @@ class ApiHandler : public esphome::web_server_idf::AsyncWebHandler {
     std::string body;
     if (action == "list") {
       body = api_.list ? api_.list() : "{\"slots\":[],\"count\":0}";
-    } else if (action == "states") {
-      body = make_states();
     } else if (action == "add") {
       // 进入学习模式会发布 text_sensor 状态，进而触发 API / SSE 广播。
       // 在 AsyncWebServer 的 HTTP 任务里直接跑会让设备重启，所以
@@ -172,16 +151,12 @@ class ApiHandler : public esphome::web_server_idf::AsyncWebHandler {
       int slot = atoi(request->arg("slot").c_str());  // 页面传 1-based 槽位 ID
       if (rf_admin::valid_slot(slot)) {
         if (action == "trigger" && api_.trigger) {
-          // RF 发射带 delay，同样交给主循环。发射后本地翻假状态并同步 HA：
-          // 首页已去掉状态圆点与第二次 set_state 请求，一次 HTTP 全部完成。
+          // 一次请求 = 一次发射，不判断任何开 / 关状态、不翻假状态、
+          // 不补第二次 MQTT 请求。RF 发射带 delay，交给主循环执行；
+          // 按 slot 用独立 tag，快速连点不同开关不会互相取消。
           auto fn = api_.trigger;
-          auto set_state = api_.set_state;
-          esphome::App.scheduler.set_timeout(&this->trigger_tag_, 0,
-                                             [fn, set_state, slot]() {
-                                               fn(slot);
-                                               bool next = rf_state::flip(static_cast<uint32_t>(slot));
-                                               if (set_state) set_state(slot, next);
-                                             });
+          esphome::App.scheduler.set_timeout(&this->trigger_tags_[slot], 0,
+                                             [fn, slot]() { fn(slot); });
         } else if (action == "remove" && api_.remove) {
           api_.remove(slot);
           this->schedule_discovery(slot);
@@ -189,14 +164,6 @@ class ApiHandler : public esphome::web_server_idf::AsyncWebHandler {
           api_.rename(slot, request->arg("name"));
           this->schedule_discovery(slot);
         }
-      }
-      body = api_.list ? api_.list() : "{\"slots\":[],\"count\":0}";
-    } else if (action == "set_state") {
-      int slot = atoi(request->arg("slot").c_str());
-      std::string want = request->arg("state");
-      if (rf_admin::valid_slot(slot) && (want == "on" || want == "off") && api_.set_state) {
-        // publish_state_set 内部会自行推迟到主循环，HTTP 任务里直接调用是安全的。
-        api_.set_state(slot, want == "on");
       }
       body = api_.list ? api_.list() : "{\"slots\":[],\"count\":0}";
     } else if (action == "add_alias" || action == "remove_alias") {
@@ -233,7 +200,7 @@ class ApiHandler : public esphome::web_server_idf::AsyncWebHandler {
 
   Api api_;
   int add_tag_{0};
-  int trigger_tag_{0};
+  std::map<int, int> trigger_tags_;
   std::map<int, int> mqtt_tags_;
   std::map<int, int> alias_tags_;
 };

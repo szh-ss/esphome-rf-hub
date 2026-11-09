@@ -11,6 +11,10 @@
 #   shenghui_tab.h     首页接管 + 该区块的 /sw/api 接口
 #   shenghui_mqtt.h    HA MQTT Discovery：把动态槽位暴露成 HA 按钮 / 事件实体
 #
+# 设计原则：RF 单向无回传，灯只认「切换」帧，因此不维护任何开 / 关状态。
+#   任何来源（物理开关 / 网页触发 / HA 按钮 / 米家 on 或 off）都只做一件事：
+#   发射一次对应槽位的 RF 码。状态判断、状态广播、状态对表全部不存在。
+#
 # 注意：includes: 注入到 main.cpp 顶部，早于所有 id(...) 对象声明，
 #       因此头文件不直接引用 id(...)，对象一律由 lambda 以参数传入。
 #       sw_frames / sw_names 两个旧 globals 保留原样且只读：它们是 OTA
@@ -25,7 +29,7 @@
 # 协议要点：
 #   昇辉   433.3MHz / 250k 2-FSK / 频偏 90kHz，同步字 54 21，
 #          负载 A4 23 + 8 字节码，触发时连发 4 次；学习需 1.5s 内两次相同帧
-#   风扇灯 433.92MHz / rc-switch protocol 1 / pulse 250us / 重发 6 帧（见 substitutions）
+#   风扇灯 433.92MHz / rc-switch protocol 1 / pulse 250us / 重发 3 帧（见 substitutions）
 #   沙发   2480MHz / 1Mbps / 0dBm，地址 05 DC 03 00 00，DPL 免确认
 #
 # HA 实体：1 个风扇 + 9 个按钮（昇辉槽位另由 MQTT Discovery 动态生成）
@@ -37,10 +41,11 @@
 #     按钮 02~09  沙发一/二/三移出移回、沙发全部移出 / 沙发全部移回
 #   昇辉开关不再有固定房间按钮，也没有固定房间名：统一在 ESP32 首页
 #   「昇辉开关管理」区块里填名称后点「添加昇辉控股开关」录入，录入后才
-#   出现该开关的触发 / 改名 / 删除；名称可随时改，日志与状态同步变化。
+#   出现该开关的触发 / 改名 / 删除；名称可随时改。
 #   槽位数量无固定上限，ID 单调递增、删除后不复用；数据存变长 NVS blob，
 #   断电不丢，并通过 MQTT Discovery 同步成 HA 按钮 / 事件实体，
 #   网页里叫什么 HA 里就叫什么。
+#   首页不显示开 / 关状态：切换型 RF 灯没有状态可维护。
 # ============================================================
 
 substitutions:
@@ -58,7 +63,6 @@ esphome:
     - sofa_rf_s3.h
     - fanlight_tx.h
     - slot_store.h
-    - shenghui_state.h
     - shenghui_switch.h
     - rf_admin.h
     - custom_index.h
@@ -103,8 +107,6 @@ esphome:
             // 副码学习 / 清除：不产生新槽位，HA 实体与自动化不变。
             [](int slot) { rf_admin::alias_learn_start(id(sw_status), slot); },
             [](int slot) { rf_admin::alias_clear(slot); },
-            // 状态胶囊对表：只发 MQTT 请求 HA 改假状态，不发射 RF 信号。
-            [](int slot, bool on) { shenghui_mqtt::device().publish_state_set(slot, on); },
           });
 
 esp32:
@@ -133,6 +135,7 @@ mqtt:
   on_connect:
     # 每次连上（含重连）遍历所有曾用过的 ID 全量重发：已录入的发 config，
     # 已删除的发空 payload，保证 broker 换过 / 设备重启后仍一致。
+    # 只同步实体清单，不订阅任何状态主题。
     # on_connect 是底层 MQTT 库回调，此时 is_connected() 仍为 false，
     # 必须由 schedule_full_sync() 推迟到主循环再注册订阅 + 发布 config。
     - lambda: 'shenghui_mqtt::device().schedule_full_sync();'
@@ -189,8 +192,9 @@ globals:
 text_sensor:
   # 射频收包 / 学习状态提示，逻辑见 shenghui_switch.h 与 rf_admin.h。
   # internal: true —— 只作为内部提示通道，不在「传感器与控制」首页渲染、
-  # 也不注册到 HA。真正的灯状态看「昇辉开关管理」圆点与 HA input_boolean。
-  # 保留实体对象是因为 C++ 里 on_packet / learn_auto / alias_learn_start
+  # 也不注册到 HA。切换型 RF 灯没有开 / 关状态，这里只写「被按下 / 已录入」
+  # 一类的瞬时提示。保留实体对象是因为 C++ 里 on_packet / learn_auto /
+  # alias_learn_start
   # 都以 StatusT* 复用它写提示，删除会牵动整套射频逻辑。
   - platform: template
     name: "昇辉控股开关状态"
@@ -233,7 +237,8 @@ cc1101:
               // 重复帧在发射结束后才到达、又被当成第二次按压。
               shenghui::runtime().last_detect[static_cast<uint32_t>(slot)] = millis();
             }
-            // event 仍照常发，HA 侧只用它翻假状态，不再发射 RF。
+            // event 只是一条「按过一次」的脉冲，供 HA 做联动（如槽位 9
+            // 切换米家原生灯）。不带任何开 / 关状态，也不再发射 RF。
             shenghui_mqtt::device().publish_press(slot);
           });
 

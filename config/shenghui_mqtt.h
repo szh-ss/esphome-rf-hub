@@ -27,7 +27,6 @@
 #include "esphome.h"
 #include "esphome/components/mqtt/custom_mqtt_device.h"
 #include "slot_store.h"
-#include "shenghui_state.h"
 
 namespace shenghui_mqtt {
 
@@ -35,10 +34,8 @@ constexpr const char *DISCOVERY_PREFIX = "homeassistant";
 constexpr const char *NODE_ID = "living_room_rf_hub";
 constexpr const char *TOPIC_PREFIX = "living-room-rf-hub";
 constexpr const char *DEVICE_NAME = "客厅 RF 中枢";
-// HA → 设备：8 个假状态的全量快照（retain）
-constexpr const char *STATE_ALL_TOPIC = "living-room-rf-hub/shenghui/state/all";
-// 设备 → HA：首页状态胶囊的对表请求，payload 形如 "5:on"（非 retain）
-constexpr const char *STATE_SET_TOPIC = "living-room-rf-hub/shenghui/state/set";
+// 不订阅、不发布任何「开 / 关状态」主题：切换型 RF 灯只认一次发射，
+// 设备侧不维护状态镜像，HA 侧也不做状态广播 / 对表。
 
 // slot 是 1-based ID；旧版这里写的是 slot+1（旧参数为 0-based 下标），
 // 迁移后 ID 1..8 与旧 topic 编号逐一对应，HA 实体 ID 保持不变。
@@ -141,9 +138,6 @@ class DiscoveryDevice : public esphome::mqtt::CustomMQTTDevice {
     subscribed_ = true;
     this->subscribe(std::string(TOPIC_PREFIX) + "/shenghui/+/command",
                     &DiscoveryDevice::on_command);
-    // 每次订阅（含 MQTT 重连）broker 都会立刻补发最后一条 retain 消息，
-    // 因此设备重启后假状态能自动恢复，不需要 HA 再主动推一次。
-    this->subscribe(std::string(STATE_ALL_TOPIC), &DiscoveryDevice::on_state_all);
   }
 
   // mqtt: on_connect 是底层 MQTT 库的回调，触发时 MQTTClientComponent::state_
@@ -183,40 +177,15 @@ class DiscoveryDevice : public esphome::mqtt::CustomMQTTDevice {
     ESP_LOGI("shenghui_mqtt", "HA 实体已发布：槽位 %d = %s", slot, name.c_str());
   }
 
-  // 物理开关按下时调用：非 retain 消息，HA event 实体每次都会更新 state
-  // 并产生 state_changed，自动化不会因为「状态没变」而漏触发。
+  // 物理开关按下时调用：一条非 retain 的脉冲消息，供 HA 做联动
+  // （例如槽位 9 切换米家原生灯）。不含任何开 / 关状态，也不改本地缓存。
   void publish_press(int slot) {
     if (!this->is_connected() || slot < 1) return;
-    // 先本地乐观翻转：物理按压不必等「HA 翻转 → retain 广播 → 设备订阅 →
-    // 前端轮询」这一整圈，首页圆点下一帧就能反映。HA 的全量 state/all
-    // 是绝对值，稍后会覆盖成最终一致值，不会造成二次翻转。
-    bool next = rf_state::flip(static_cast<uint32_t>(slot));
     this->publish(event_topic(slot), "{\"event_type\":\"press\"}", 0, false);
-    ESP_LOGI("shenghui_mqtt", "按下事件已发布：槽位 %d（本地状态先翻为 %s）",
-             slot, next ? "开" : "关");
-  }
-
-  // .35 首页状态胶囊：只请求 HA 修改假状态，绝不发射 RF 信号。
-  // 乐观更新本地缓存让页面立即反馈；HA 收到后会再发一次全量 state/all
-  // 作为最终一致值。按 slot 用独立 scheduler tag，连续点多个不会互相取消。
-  void publish_state_set(int slot, bool on) {
-    if (slot < 1) return;
-    std::string payload = std::to_string(slot) + (on ? ":on" : ":off");
-    auto &tag = this->state_tags_[slot];
-    esphome::App.scheduler.set_timeout(&tag, 0, [this, slot, on, payload]() {
-      rf_state::set(static_cast<uint32_t>(slot), on);
-      if (!this->is_connected()) return;
-      this->publish(STATE_SET_TOPIC, payload, 0, false);
-      ESP_LOGI("shenghui_mqtt", "状态对表已发送：槽位 %d → %s", slot, on ? "开" : "关");
-    });
+    ESP_LOGI("shenghui_mqtt", "按下事件已发布：槽位 %d", slot);
   }
 
  protected:
-  void on_state_all(const std::string &topic, const std::string &payload) {
-    rf_state::parse(payload);
-    ESP_LOGI("shenghui_mqtt", "HA 假状态已同步：%s", payload.c_str());
-  }
-
   void on_command(const std::string &topic, const std::string &payload) {
     if (payload != "PRESS" || !trigger_) return;
     // topic: living-room-rf-hub/shenghui/<ID>/command
@@ -233,7 +202,6 @@ class DiscoveryDevice : public esphome::mqtt::CustomMQTTDevice {
   TriggerFn trigger_;
   bool subscribed_{false};
   std::map<uint32_t, int> tags_;  // 每个 ID 独立的 scheduler 去重 tag
-  std::map<int, int> state_tags_;  // 状态对表按 slot 去重
   int sync_tag_{0};               // on_connect 全量同步的 scheduler 去重 tag
 };
 

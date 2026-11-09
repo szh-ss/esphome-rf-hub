@@ -1,6 +1,6 @@
 # 客厅 RF 中枢
 
-> 用一块 ESP32-S3 + ESPHome，把三套互不兼容的老式射频设备接进 Home Assistant：昇辉自发电开关、433 MHz 风扇灯、nRF24 电动沙发。重点解决 **RF 单向发射、没有状态回传** 带来的假状态同步、双控状态反相和语音控制问题。
+> 用一块 ESP32-S3 + ESPHome，把三套互不兼容的老式射频设备接进 Home Assistant：昇辉自发电开关、433 MHz 风扇灯、nRF24 电动沙发。核心设计是**完全无状态**：RF 单向发射、灯具只认「切换」帧，因此不推算、不维护任何开 / 关状态——任何来源的命令都只发射一次对应 RF 码。
 
 ---
 
@@ -8,7 +8,7 @@
 
 | 痛点 | 处理方式 |
 | --- | --- |
-| 原厂 RF 开关只发射、不回传，HA 不知道灯现在是开是关 | HA 侧用 `input_boolean` 维护「假状态」，设备侧保留一份内存镜像，靠 MQTT 双向对齐 |
+| 原厂 RF 开关只发射、不回传，HA 无从知道灯是开是关 | 不推算状态：`turn_on` / `turn_off` 不做分辨，都只发射一次切换码；界面也不显示开关状态 |
 | 一盏灯由两个物理开关控制，两个开关发的码不一样，语音会反相 | 「一槽多码」：一个主槽位可绑多个副码，命中任一码都按同一个槽位 ID 上报 |
 | 固定 8 个槽位不够，且改数组长度会丢 NVS 旧数据 | 变长 NVS blob，槽位数量无固定上限；旧 8 槽在首次启动时无损迁移 |
 | 网页里录入的开关不会自动变成 HA 实体 | 手写 MQTT Discovery，录入 / 改名 / 删除即时同步成 HA 的 button 与 event |
@@ -27,37 +27,32 @@ flowchart TB
         A3["电动沙发遥控器<br/>2.4 GHz / nRF24"]
     end
 
-    subgraph ESP["ESP32-S3 · ESPHome 固件"]
+    subgraph ESP["ESP32-S3 · ESPHome 固件 · 无状态"]
         B1["CC1101 接收"]
-        B2["T2L 发射"]
-        B3["nRF24 发射"]
-        B4["slot_store<br/>变长 NVS blob + 副码表"]
-        B5["rf_state<br/>假状态内存镜像"]
-        B6["Web 管理页<br/>/ 与 /sw/api"]
+        B2["T2L / nRF24 发射"]
+        B3["slot_store<br/>变长 NVS blob + 副码表"]
+        B4["Web 管理页<br/>/ 与 /sw/api"]
     end
 
     subgraph HA["Home Assistant · MQTT"]
         C0["mosquitto broker"]
         C1["Discovery 生成的<br/>button / event"]
-        C2["input_boolean × 8<br/>假状态"]
-        C3["template switch × 8"]
-        C4["自动化<br/>事件翻转 / 状态广播 / 精确对表"]
-        C5["侧边栏状态页"]
-        C6["巴法云 → 小爱语音"]
+        C2["template switch × 8<br/>optimistic，仅显示"]
+        C3["槽位 9 联动米家原生灯"]
+        C4["巴法云 → 小爱语音"]
     end
 
-    A1 --> B1 --> B4
-    A1 -.->|"按压事件"| C0
-    B4 --> C0
-    B5 <-->|"state/all · state/set"| C0
-    B6 -->|"触发 / 管理"| B4
-    C0 --> C1 --> C4 --> C2 --> C3
+    A1 --> B1 --> B3
+    B3 -->|"发射一次 RF 码"| B2
+    A1 -.->|"按压脉冲 event"| C0
+    B4 -->|"触发 / 管理"| B3
+    C0 --> C1
+    C1 -->|"N/command"| B3
+    C0 --> C3
+    C2 -->|"on 或 off 都按一次按钮"| C1
     C2 --> C4
-    C4 -->|"retain 全量状态"| C0
-    C3 --> C6
-    C2 --> C5
     B2 -.->|"发射 RF"| A2
-    B3 -.->|"发射 RF"| A3
+    B2 -.->|"发射 RF"| A3
 ```
 
 ---
@@ -68,7 +63,7 @@ flowchart TB
 - **双控副码**：每个槽位可再绑多个 RF 帧，命中副码仍按主槽位 ID 上报，HA 侧实体、topic、自动化完全不用改。
 - **抗噪声学习**：CC1101 在空闲时每 0.5~2 秒会收到随机噪声包，原「连续两帧相同」会被噪声插队打断。改为 3 秒滑动窗口内找重复帧（允许 1 字节误码），并要求连按 2~3 下。
 - **官方风扇卡片**：`template fan`，6 挡滑块 + 正反转 + 开关；HA 滑块松手才下发一次 `speed_level`，设备收到即刻发射，不再等待 250 ms。
-- **假状态同步（不占界面）**：HA 用 `input_boolean` 推算灯的开 / 关，设备侧留一份内存镜像靠 MQTT 对齐，供米家 / 小爱判断状态。首页与 HA 状态页都不再显示状态、不再轮询，也不保留对表 UI。
+- **彻底无状态**：设备不存状态镜像、HA 不用 `input_boolean`、没有 `state/all` 广播和对表自动化。HA 的 `template switch` 用内建 `optimistic` 只给界面 / 云端一个显示值，`turn_on` 与 `turn_off` 都无条件按一次按钮发射。首页与状态页都不显示开关状态。
 - **中文管理界面**：中文分组标题、中文运行时长、调试日志与实体表等高、日志内部滚动且新消息自动到底（手动上翻时不打断）。
 - **MQTT 掉线不重启设备**：`reboot_timeout: 0s`，射频中枢不会因为 broker 抖动而重启。
 
@@ -84,9 +79,9 @@ flowchart TB
 
 ### Home Assistant 侧边栏「昇辉灯状态」
 
-![HA 侧边栏状态页：假状态对表与已接入小爱的开关](docs/ha-shenghui-status.png)
+![HA 侧边栏：已接入小爱的开关与客厅灯](docs/ha-shenghui-status.png)
 
-> 截图摄于界面精简之前：当时左侧 8 个 `input_boolean` 用于对表、右侧 8 个 `template switch` 是接入小爱的开关（**点击会发射 RF**）。当前版本已移除左侧对表卡片与设备首页的状态圆点，假状态只在 HA / 米家 / 小爱之间同步，不参与界面渲染。
+> 截图摄于界面精简之前：当时左侧 8 个 `input_boolean` 用于对表、右侧 8 个 `template switch` 是接入小爱的开关（**点击会发射 RF**）。当前版本已移除对表卡片、全部假状态与设备首页的状态圆点；右侧开关仍在，只是不再分辨开 / 关，点一次就发射一次。
 
 ---
 
@@ -128,9 +123,8 @@ flowchart TB
 │   ├── fanlight_tx.h           # 风扇灯 11 组 OOK 码表 + 挡位映射
 │   ├── slot_store.h            # 变长 NVS blob：槽位 + 副码 + 旧 8 槽迁移
 │   ├── shenghui_switch.h       # CC1101 收包 / 学习状态机 / 去重 / 触发
-│   ├── shenghui_state.h        # 假状态的设备侧内存镜像
 │   ├── rf_admin.h              # 槽位命名 / 删除 / 学习入口（薄封装）
-│   ├── shenghui_mqtt.h         # MQTT Discovery + 事件 / 状态主题
+│   ├── shenghui_mqtt.h         # MQTT Discovery + 按压脉冲事件（无状态主题）
 │   ├── shenghui_tab.h          # 首页接管 + /sw/api 接口
 │   └── custom_index.h          # 补丁后的官方首页（gzip 字节数组，构建产物）
 ├── docs/
@@ -184,39 +178,34 @@ docker exec esphome esphome run /config/esp32.yaml --device <设备 IP> --no-log
 
 ---
 
-## 状态同步机制（本项目核心）
+## 无状态发射链路（本项目核心）
 
-RF 开关没有回传，所以「灯是开是关」只能是 HA 推算出来的假状态。三条入口必须保持同一份数据：
+RF 灯具只认「切换」帧，且没有状态回传。既然「开」和「关」都只能靠发射同一个码来切换，就没有任何需要分辨或保存的状态。所有入口收敛成一条规则：**一个命令 = 一次发射**。
+
+| 入口 | 路径 | 动作 |
+| --- | --- | --- |
+| 物理昇辉开关 | CC1101 收包 → 按槽位查码 | 本机直接发射一次；另发一条非 retain `event` 脉冲供 HA 联动 |
+| 网页「触发」 | `GET /sw/api?action=trigger&slot=N` | 设备发射一次，前端只发一个 HTTP 请求 |
+| HA MQTT 按钮 | `shenghui/N/command` | 重放一次该槽位 RF 帧 |
+| 米家 / 小爱（巴法） | 云端 `{"on": true}` 或 `{"on": false}` | 都映射到一次 `button.press`，不看当前状态 |
 
 ```mermaid
 sequenceDiagram
-    participant P as 物理开关
+    participant P as 物理开关 / 网页 / HA / 米家
     participant E as ESP32
     participant M as MQTT
     participant H as HA
-    participant V as 小爱 / 网页
 
-    P->>E: 发射 RF 帧
-    E->>E: 本地乐观 flip（假状态先翻）
-    E->>M: shenghui/N/event  {"event_type":"press"}
-    M->>H: event 实体产生 state_changed
-    H->>H: 自动化翻转对应 input_boolean
-    H->>M: state/all  "1:on,2:off,..." (retain)
-    M->>E: 全量绝对状态覆盖内存镜像
-    E->>E: 状态只留在内存，界面不渲染
-
-    V->>H: 语音 / 网页触发
-    H->>M: shenghui/N/command 或 state/set
-    M->>E: 重放 RF 帧 / 对表
-    E->>H: 结果回传，全量广播对齐
+    P->>E: 一次命令（不区分 on / off）
+    E->>E: 查槽位码，发射一次 RF
+    E-->>M: 可选：一条 event 脉冲（按压事件）
+    M-->>H: 仅用于联动（如槽位 9 切换米家原生灯）
+    Note over E,H: 无状态镜像、无状态广播、无对表、无回环判据
 ```
 
-关键设计：
+**为什么可以删掉状态**：早期用 `input_boolean` 推算状态，是为了给 HA 的 `template switch` 加 `condition` 门控，避免云端回显重复发射。现在回显在巴法集成的云端入口按时间窗合并，门控与假状态都不再需要；发射链路本身完全不看状态。
 
-- **物理按压**发的是非 retain 的 `event` 消息，每次按下都能触发 HA 自动化；设备本地立即 `flip()` 一次。HA 随后发来的 `state/all` 是绝对值，会覆盖成最终一致值，不会翻两次。界面已不渲染这些状态。
-- **网页「触发」**会发射 RF，设备按槽位屏蔽自己刚发出的帧（`last_tx` 150 ms）；发射与 `flip()` + `state/set` 都在设备端一次完成，前端只发一个 HTTP 请求。
-- **`state/all` 用 retain**：设备重启后由 broker 自动恢复假状态，不依赖 HA 在线。
-- **防回环**：HA 的 `template switch` 只在状态与目标不一致时才按按钮发射，避免回写卡片状态时重复发射 RF。
+**唯一保留的合并**：巴法 / 米家云端会把一次点按回显成一串命令（实测间隔 2~7 秒），`bemfa_cloud/tcp.py` 用固定 5 秒静默窗 + 2 秒快速连点放行把这串合并成一次。它不分辨 on / off 语义、不比较 HA 状态，也不在物理链路上；删掉它，米家点一次会触发多次。
 
 ---
 
@@ -228,10 +217,10 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | 设备 → HA | `homeassistant/button/living_room_rf_hub_shenghui_<slot>/config` | Discovery 配置 JSON | 是 |
 | 设备 → HA | `homeassistant/event/living_room_rf_hub_shenghui_<slot>_press/config` | event 实体配置 JSON | 是 |
-| HA → 设备 | `living-room-rf-hub/shenghui/<slot>/command` | 按下按钮，重放该槽位 RF 帧 | 否 |
-| 设备 → HA | `living-room-rf-hub/shenghui/<slot>/event` | `{"event_type":"press"}` | 否 |
-| HA → 设备 | `living-room-rf-hub/shenghui/state/all` | `1:on,2:off,5:on`（全量快照） | **是** |
-| 设备 → HA | `living-room-rf-hub/shenghui/state/set` | `5:on`（单槽对表请求） | 否 |
+| HA → 设备 | `living-room-rf-hub/shenghui/<slot>/command` | `PRESS`：发射一次该槽位 RF 帧 | 否 |
+| 设备 → HA | `living-room-rf-hub/shenghui/<slot>/event` | `{"event_type":"press"}`：一次按压脉冲 | 否 |
+
+**没有状态主题**：设备不订阅、不发布 `state/all` / `state/set`，也不缓存任何开 / 关值。旧版本留下的 retain `state/all` 已在切换时清空。
 
 设备每次连上 broker 都会遍历 `1..next_id-1` 全量重发 Discovery：已录入的发 config，已删除 / 未录入的发空 payload，保证换过 broker 或重启后删掉的实体不会自己长回来。`mqtt.discovery: false` 关闭 ESPHome 自身的自动发现，避免风扇、沙发等静态实体在 HA 里出现重复。
 
@@ -243,18 +232,16 @@ sequenceDiagram
 
 | action | 参数 | 作用 |
 | --- | --- | --- |
-| `list` | — | 槽位 JSON：名称、副码数、假状态、学习状态、最近收到的 RF 帧 |
-| `states` | — | 轻量状态快照（仅槽位号 + 状态）；首页已不再轮询，保留供外部诊断 |
+| `list` | — | 槽位 JSON：名称、副码数、学习状态、最近收到的 RF 帧 |
 | `add` | `name` | 分配新 ID 并进入学习模式 |
 | `rename` | `slot`, `name` | 改名（同步刷新 HA 实体名） |
 | `remove` | `slot` | 删除槽位（ID 保留不复用） |
-| `trigger` | `slot` | 发射该槽位 RF 帧，并同步翻转假状态 |
+| `trigger` | `slot` | 发射一次该槽位 RF 帧，仅此而已 |
 | `sync` | `slot` | 手动重发该槽位的 Discovery 配置 |
 | `add_alias` | `slot` | 为该槽位学习副码（双控） |
 | `remove_alias` | `slot` | 清除该槽位全部副码 |
-| `set_state` | `slot`, `state=on/off` | 只对表 HA 假状态，不发射 RF |
 
-前端注入脚本还做了：中文分组标题、紧凑风扇控件、标题右侧中文运行时长、日志列与实体列等高、日志内部滚动并自动跟随（手动上翻时暂停跟随）。**状态显示、状态轮询、操作收敛等待已全部移除**：一次操作只发一个请求，录入 / 副码学习的确认轮询压到 150 ms。射频侧按槽位独立去抖 150 ms（只吃掉一次按压内部的重复帧，快速连点不再丢失），网页「触发」的自收帧只屏蔽该槽位 150 ms。
+前端注入脚本还做了：中文分组标题、紧凑风扇控件、标题右侧中文运行时长、日志列与实体列等高、日志内部滚动并自动跟随（手动上翻时暂停跟随）。**状态显示、状态轮询、状态接口、操作收敛等待已全部移除**：一次操作只发一个请求，录入 / 副码学习的确认轮询压到 150 ms。射频侧按槽位独立去抖 150 ms（只吃掉一次按压内部的重复帧，快速连点不再丢失），网页「触发」的自收帧只屏蔽该槽位 150 ms；这些是 RF 帧级防护，不是状态判断。
 
 > `text_sensor.sw_status` 设为 `internal: true`：它只作为学习与收包提示的内部通道，既不在首页渲染，也不注册到 HA。C++ 里多个函数以 `StatusT*` 复用它，所以实体对象保留。
 
@@ -264,63 +251,42 @@ sequenceDiagram
 
 HA 配置不在本仓库内（部署在另一台常开主机的 Home Assistant 配置目录），以下是当前使用的结构摘要，全部用占位名表示。
 
-**1. 假状态与带状态开关**
+**1. 无状态开关**
+
+不再有 `input_boolean`。`rf_template.yaml` 的 8 个 `template switch` 用 HA 内建 `optimistic` 只提供一个显示值，`turn_on` 与 `turn_off` 完全对称：
 
 ```yaml
-# configuration.yaml（节选）
-input_boolean:
-  rf_shufang_deng_state:
-    name: 书房灯状态
-  # 共 8 个，对应槽位 1~8
-
-# rf_template.yaml（节选）— 给小爱用的带状态开关
 - name: 书房灯
   unique_id: rf_shufang_deng
-  state: "{{ is_state('input_boolean.rf_shufang_deng_state', 'on') }}"
+  optimistic: true
   turn_on:
-    - condition: state
-      entity_id: input_boolean.rf_shufang_deng_state
-      state: "off"
     - action: button.press
       target:
         entity_id: button.<Discovery 生成的槽位 1 按钮>
-    - action: input_boolean.turn_on
-      target:
-        entity_id: input_boolean.rf_shufang_deng_state
   turn_off:
-    # 对称：state 为 on 时才按按钮 + turn_off
+    - action: button.press
+      target:
+        entity_id: button.<Discovery 生成的槽位 1 按钮>
 ```
 
-实体 ID 由 Discovery 按中文名生成，请在 HA「开发者工具 → 状态」里确认实际值。`turn_on` / `turn_off` 前面那层 `condition` 就是防回环判据。
+实体 ID 由 Discovery 按中文名生成，请在 HA「开发者工具 → 状态」里确认实际值。没有 `condition`、没有状态模板、没有回环判据：命令来了就按一次按钮。
 
-**2. 自动化（当前 27 条，分四类）**
+**2. 自动化（当前 2 条）**
 
 | 类别 | 条数 | 作用 |
 | --- | --- | --- |
-| 早期场景联动 | 2 | 例如餐厅开关触发风扇灯照明 |
-| 物理按压同步 | 8 | MQTT `event` → 翻转对应 `input_boolean` |
-| 状态广播 | 1 | 任一假状态变化 → 发 retain `state/all` 全量快照 |
-| 精确对表 | 16 | `state/set` 收到 `N:on` / `N:off` → 精确设置第 N 个 `input_boolean` |
+| 面板保活 | 1 | 定时点亮门口中控屏 |
+| 原生灯联动 | 1 | `shenghui/9/event` → `homeassistant.toggle` 米家原生客厅灯 |
 
-状态广播的载荷模板：
-
-```yaml
-topic: living-room-rf-hub/shenghui/state/all
-payload: >-
-  1:{{ states('input_boolean.rf_shufang_deng_state') }},2:{{ states('input_boolean.rf_zhuwo_deng_state') }},...
-qos: 0
-retain: true
-```
-
-精确对表刻意写成 16 条 `payload` 精确匹配的极简自动化，而不是一条带模板 / 条件的复杂自动化——后者在本环境实测不生效。`mode: queued`、`max: 10` 防止连续按压丢消息。
+原先 27 条只为假状态存在的自动化（8 条物理按压状态同步、1 条 `state/all` 广播、16 条 `state/set` 对表、2 条槽位 9 对表）全部删除。物理昇辉开关与槽位 4 的风扇灯照明已在设备本地直通，不需要 HA 中转。
 
 **3. 侧边栏状态页**
 
-Lovelace 注册 `shenghui-status` /「昇辉灯状态」，指向 `shenghui_dashboard.yaml`。当前只显示 8 个已接入语音的开关与客厅灯原生灯；假状态对表卡片已移除。
+Lovelace 注册 `shenghui-status` /「昇辉灯状态」，指向 `shenghui_dashboard.yaml`。显示 8 个可发射 RF 的开关与客厅灯原生灯，不显示任何推算状态。
 
 **4. 小爱语音**
 
-通过 `bemfa_cloud` 集成把 8 个 `template switch` 同步为巴法云主题。注意该集成的选项流「修改同步」**只会改 HA 本地配置**，云端改名要另调 `https://apis.bemfa.com/va/modifyName`；米家 / 小爱侧还有缓存，通常要解绑重加才会用新名字。另外米家「其他平台设备」不会在首页生成设备卡片，只能语音控制。
+通过 `bemfa_cloud` 集成把 8 个 `template switch` 同步为巴法云主题。云端会把一次点按回显成一串命令，集成内的 `tcp.py` 只按时间窗合并这串回显，不分辨 on / off、不比较 HA 状态。注意该集成的选项流「修改同步」**只会改 HA 本地配置**，云端改名要另调 `https://apis.bemfa.com/va/modifyName`；米家 / 小爱侧还有缓存，通常要解绑重加才会用新名字。另外米家「其他平台设备」不会在首页生成设备卡片，只能语音控制。
 
 ---
 
@@ -335,21 +301,21 @@ Lovelace 注册 `shenghui-status` /「昇辉灯状态」，指向 `shenghui_dash
 ```cpp
 [](int slot) {
   if (slot == 4) id(fanlight_light_button).press();
-  shenghui_mqtt::device().publish_press(slot);  // event 只用于翻 HA 假状态
+  shenghui_mqtt::device().publish_press(slot);  // 一条脉冲，仅用于 HA 联动
 }
 ```
 
 - HA 侧那条「餐厅开关 → 风扇灯」自动化必须**删除**，否则会重复发射一次。
 - 槽位 4 的三条入口（物理按压 / `.35` 网页「触发」/ HA MQTT 按钮）统一走 `fanlight_light_button`，都发 LIGHT 码，不再发灯不认的墙壁开关码。
 - 配合 3 帧短 burst（约 118 ms）、按槽 150 ms 去抖、150 ms 自收屏蔽，单次按压到灯响应只剩射频发射时间。
-- 首页一次操作只发一个 HTTP 请求：设备发射后自行 `flip()` 并补 `state/set`，不再有第二次请求、状态圆点、250 ms 轮询或 400 ms 收敛。
+- 首页一次操作只发一个 HTTP 请求：设备发射完就结束，没有 `flip()`、没有 `state/set`、没有状态圆点、250 ms 轮询或 400 ms 收敛。
 
 ---
 
 ## 已知限制
 
-- **RF 单向无回传**：假状态是推算值。停电、漏收、用原装遥控器操作时仍可能错位；界面已移除对表入口，需要时在 HA「开发者工具 → 状态」里直接改对应 `input_boolean`，或临时加回对表卡片。
-- **设备重启后**依赖 broker 的 retain `state/all` 恢复假状态；若 retain 被清空，米家 / 小爱的状态判断会失准。
+- **RF 单向无回传、切换型灯**：没有状态可维护，米家 / 小爱显示的开 / 关只是 HA 乐观值，可能与灯的实际状态不一致。说「打开」和「关闭」都会让灯切换一次，这是设计使然；需要绝对开 / 关语义就必须换成有回传的灯具。
+- **巴法云端回显**：一次点按会被云端回显成一串命令，集成按固定 5 秒静默窗合并；间隔落在 2~5 秒的连续两次点按，第二次可能被合并掉。物理开关 / 网页 / HA 按钮链路完全不经过这一层。
 - **风扇卡片是乐观状态**：`restore_mode: NO_RESTORE`，用原装遥控器改挡不会同步回来。不要用 `ALWAYS_OFF`——它只把 `state` 强制为 false，`speed` / `direction` 仍会从 Flash 恢复，`setup()` 里的 `publish_state()` 会误触发 `on_speed_set` / `on_direction_set`，导致每次上电都发一组 RF 把风扇点转。`on_direction_set` 另有 `state` 保护，风扇关着时不下发方向码。
 - **槽位 ID 删除后留空洞**，这是为了让 HA 实体 / topic / 自动化绑定保持稳定，不是 bug。
 - **`gen_index.py` 与 ESPHome 版本强绑定**：官方首页的压缩 JS 一变，精确替换就会失败并报错，需重新对照生成。
