@@ -152,11 +152,16 @@ class ApiHandler : public esphome::web_server_idf::AsyncWebHandler {
       if (rf_admin::valid_slot(slot)) {
         if (action == "trigger" && api_.trigger) {
           // 一次请求 = 一次发射，不判断任何开 / 关状态、不翻假状态、
-          // 不补第二次 MQTT 请求。RF 发射带 delay，交给主循环执行；
-          // 按 slot 用独立 tag，快速连点不同开关不会互相取消。
+          // 不补第二次 MQTT 请求。RF 发射带 delay，交给主循环执行。
+          // scheduler 会取消「同 tag 的旧任务」：固定 tag 会把 120ms 发射
+          // 阻塞期间的快速连点合并成一次（实测点十几次只发一两次）。
+          // 每次请求分配独立 tag，回调执行时释放，生命周期覆盖排队期。
           auto fn = api_.trigger;
-          esphome::App.scheduler.set_timeout(&this->trigger_tags_[slot], 0,
-                                             [fn, slot]() { fn(slot); });
+          auto *tag = new uint32_t(0);
+          esphome::App.scheduler.set_timeout(tag, 0, [fn, slot, tag]() {
+            delete tag;
+            fn(slot);
+          });
         } else if (action == "remove" && api_.remove) {
           api_.remove(slot);
           this->schedule_discovery(slot);
@@ -200,7 +205,6 @@ class ApiHandler : public esphome::web_server_idf::AsyncWebHandler {
 
   Api api_;
   int add_tag_{0};
-  std::map<int, int> trigger_tags_;
   std::map<int, int> mqtt_tags_;
   std::map<int, int> alias_tags_;
 };

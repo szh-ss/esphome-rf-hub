@@ -319,6 +319,9 @@ button:
     name: "风扇灯开关 01"
     id: fanlight_light_button
     on_press:
+      # 可观测：每次真正发射 LIGHT 码都留一条 INFO 日志，便于区分
+      # 「设备没发」和「发了但灯具接收器没解出来」。
+      - lambda: 'ESP_LOGI("fanlight", "LIGHT 码发射一次");'
       - remote_transmitter.transmit_raw:
           code: !lambda 'return fanlight::code(fanlight::LIGHT);'
           carrier_frequency: 0Hz

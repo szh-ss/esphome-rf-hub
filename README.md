@@ -307,8 +307,8 @@ Lovelace 注册 `shenghui-status` /「昇辉灯状态」，指向 `shenghui_dash
 
 - HA 侧那条「餐厅开关 → 风扇灯」自动化必须**删除**，否则会重复发射一次。
 - 槽位 4 的三条入口（物理按压 / `.35` 网页「触发」/ HA MQTT 按钮）统一走 `fanlight_light_button`，都发 LIGHT 码，不再发灯不认的墙壁开关码。
-- 配合 3 帧短 burst（约 118 ms）、按槽 150 ms 去抖、150 ms 自收屏蔽，单次按压到灯响应只剩射频发射时间。
-- 首页一次操作只发一个 HTTP 请求：设备发射完就结束，没有 `flip()`、没有 `state/set`、没有状态圆点、250 ms 轮询或 400 ms 收敛。
+- 配合 3 帧短 burst（单帧 40 ms，共 120 ms）、按槽 150 ms 去抖、150 ms 自收屏蔽，单次按压到灯响应只剩射频发射时间。`fanlight_light_button` 的 `on_press` 会打一条 INFO 日志 `LIGHT 码发射一次`，可在 .35 调试日志里直接数设备实际发射了几次。
+- 首页一次操作只发一个 HTTP 请求：设备发射完就结束，没有 `flip()`、没有 `state/set`、没有状态圆点、250 ms 轮询或 400 ms 收敛。`/sw/api?action=trigger` 为每次请求分配独立的 scheduler tag——ESPHome 的 `set_timeout` 会取消同 tag 的旧任务，固定 tag 会把 120 ms 发射阻塞期间的快速连点合并成一次（实测点十几次只发一两次）。
 
 ---
 
