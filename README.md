@@ -327,7 +327,7 @@ Lovelace 注册 `shenghui-status` /「昇辉灯状态」，指向 `shenghui_dash
 
 - **RF 单向无回传**：假状态是推算值。停电、漏收、用原装遥控器操作时仍可能错位，需要手动对表一次（点首页圆点或 HA 状态页）。
 - **设备重启后**依赖 broker 的 retain `state/all` 恢复假状态；若 retain 被清空，全部显示「未知」。
-- **风扇卡片是乐观状态**：`restore_mode: ALWAYS_OFF`，用原装遥控器改挡不会同步回来。
+- **风扇卡片是乐观状态**：`restore_mode: NO_RESTORE`，用原装遥控器改挡不会同步回来。不要用 `ALWAYS_OFF`——它只把 `state` 强制为 false，`speed` / `direction` 仍会从 Flash 恢复，`setup()` 里的 `publish_state()` 会误触发 `on_speed_set` / `on_direction_set`，导致每次上电都发一组 RF 把风扇点转。`on_direction_set` 另有 `state` 保护，风扇关着时不下发方向码。
 - **槽位 ID 删除后留空洞**，这是为了让 HA 实体 / topic / 自动化绑定保持稳定，不是 bug。
 - **`gen_index.py` 与 ESPHome 版本强绑定**：官方首页的压缩 JS 一变，精确替换就会失败并报错，需重新对照生成。
 - **米家首页设备卡片**：这些实体是软件虚拟对象，没有在小米 IoT 平台注册的产品型号与设备证书，无法成为米家原生设备卡片；巴法云 / Matter 桥等云对云或第三方路径在当前国区米家也不生成首页卡片。
