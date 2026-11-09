@@ -49,13 +49,7 @@ INJECT = r"""<script>
     '#col_shenghui .sh-card button+button{margin-left:14px}',
     '#col_shenghui .sh-card button.danger{color:#b42318;border-color:#f0c7c2}',
     '#col_shenghui .sh-badge{font-size:11px;padding:2px 6px;border-radius:10px;background:rgba(127,127,127,.18);opacity:.85;white-space:nowrap;flex:none;margin-right:4px}',
-    // 状态圆点：与方形按钮完全区分，副码徽标在前、触发按钮在后，两侧留白。
-    '#col_shenghui .sh-card button.sh-dot{display:inline-block;width:18px;height:18px;padding:0;margin:0 14px 0 10px;border-radius:50%;border:2px solid rgba(127,127,127,.5);background:rgba(127,127,127,.22);color:transparent;font-size:0;line-height:0;flex:none;cursor:pointer;transition:transform .12s ease}',
-    '#col_shenghui .sh-card button.sh-dot:hover{transform:scale(1.15)}',
-    '#col_shenghui .sh-card button.sh-dot.on{background:#22c55e;border-color:#16a34a}',
-    '#col_shenghui .sh-card button.sh-dot.unknown{border-style:dashed;opacity:.55}',
-    '#col_shenghui .sh-card button.sh-dot:disabled{opacity:.45;cursor:wait}',
-    '#col_shenghui .sh-card button.sh-dot+button{margin-left:0}',
+    // 状态圆点已移除：副码徽标后直接是「触发」按钮，不再显示 / 轮询状态。
     '#col_shenghui .sh-empty{background:rgba(127,127,127,.08);border:1px dashed rgba(127,127,127,.35);border-radius:8px;padding:16px;text-align:center;opacity:.75;font-size:13px;margin-bottom:8px}',
     // 操作说明置于「昇辉开关管理」最上方，作为进入该区块的第一段引导。
     '#col_shenghui .sh-tip{opacity:.7;font-size:12px;line-height:1.65;margin:0 0 12px;padding:0 0 10px;border-bottom:1px solid rgba(127,127,127,.22)}',
@@ -217,12 +211,10 @@ INJECT = r"""<script>
         box.innerHTML='<div class="sh-empty">尚未录入开关</div>';
       }else{
         box.innerHTML=d.slots.map(function(x){
-          var n=x.aliases||0, st=x.state||'unknown';
-          var label=st==='on'?'开':st==='off'?'关':'未知';
+          var n=x.aliases||0;
           return '<div class="sh-card"><span class="idx">'+x.slot+'</span>'
             +'<input type="text" title="最多 5 个汉字或 15 个字母" value="'+esc(x.name)+'" data-input="'+x.slot+'">'
             +(n?'<span class="sh-badge">'+n+' 个副码</span>':'')
-            +'<button class="sh-dot '+st+'" data-act="set_state" data-state-badge="'+x.slot+'" data-value="'+st+'" data-slot="'+x.slot+'" aria-label="'+label+'" title="'+label+'：点击对表，只修改 HA 假状态，不会发射 RF 信号"></button>'
             +'<button data-act="trigger" data-slot="'+x.slot+'">触发</button>'
             +'<button data-act="rename" data-slot="'+x.slot+'">改名</button>'
             +'<button data-act="add_alias" data-slot="'+x.slot+'">添加副码</button>'
@@ -243,24 +235,7 @@ INJECT = r"""<script>
       return d;
     }
     function load(){ return api('action=list').then(render); }
-    // 只更新状态圆点，不重建整张卡片，避免打断用户正在输入的名称。
-    // HA 改状态 / 物理按键翻转 / 小爱语音都会在这里 0.25 秒内反映出来。
-    // 走轻量 states 接口（只回槽位号 + 状态），高频轮询不拖慢设备。
-    function refreshStates(){
-      return api('action=states').then(function(d){
-        (d.slots||[]).forEach(function(x){
-          var b=sec.querySelector('[data-state-badge="'+x.slot+'"]');
-          if(!b) return;
-          var st=x.state||'unknown';
-          var label=st==='on'?'开':st==='off'?'关':'未知';
-          b.className='sh-dot '+st;
-          b.setAttribute('data-value',st);
-          b.setAttribute('aria-label',label);
-          b.setAttribute('title',label+'：点击对表，只修改 HA 假状态，不会发射 RF 信号');
-        });
-        return d;
-      });
-    }
+    // 状态显示与高频轮询已移除：一次操作只发一个请求、不做任何后续等待。
     function waitForNew(before){
       var known={}, tries=0;
       before.forEach(function(x){known[x.slot]=1;});
@@ -280,7 +255,7 @@ INJECT = r"""<script>
             say('未检测到新开关，可重试',true);
           }
         }).catch(function(){});
-      },500);
+      },150);
     }
     // 副码录入不新增槽位，靠 aliases 计数或新增射频帧判断学习结果。
     function waitForAlias(slot,before,rxBase){
@@ -315,7 +290,7 @@ INJECT = r"""<script>
             say('未检测到副码，可重试',true);
           }
         }).catch(function(){});
-      },500);
+      },150);
     }
 
     $('#sh-add').addEventListener('click',function(){
@@ -338,39 +313,12 @@ INJECT = r"""<script>
       var slot=b.getAttribute('data-slot'), act=b.getAttribute('data-act');
       if(act==='remove' && !window.confirm('确定删除这个开关？')) return;
       if(act==='remove_alias' && !window.confirm('确定清除这个开关的所有副码？')) return;
-      if(act==='set_state'){
-        var cur=b.getAttribute('data-value');
-        var want=cur==='on'?'off':'on';
-        var nameEl=this.querySelector('[data-input="'+slot+'"]');
-        var nm=nameEl?nameEl.value.trim():('开关'+slot);
-        b.disabled=true;
-        api('action=set_state&slot='+slot+'&state='+want).then(function(d){
-          render(d);
-          say('已把「'+nm+'」对表为 '+(want==='on'?'开':'关')+'（只改状态，不发射信号）');
-          setTimeout(function(){refreshStates().catch(function(){});},400);
-        }).catch(function(){
-          b.disabled=false;
-          say('对表失败，请检查 HA 与 MQTT 连接',true);
-        });
-        return;
-      }
-      // 「触发」等价于按了一次物理开关：灯会翻转，HA 假状态也要跟着翻一次。
-      // 设备发射后会屏蔽自己刚发的帧（last_tx 1 秒），不会走 event 链路，
-      // 所以这里显式补一次 set_state；先乐观改圆点，避免等 MQTT 往返。
+      // 「触发」只发一个请求；设备端发射 RF 的同时自行翻假状态并同步 HA，
+      // 不再有第二次 HTTP 请求、状态圆点和收敛等待。
       if(act==='trigger'){
-        var dot=sec.querySelector('[data-state-badge="'+slot+'"]');
-        var cur=dot?dot.getAttribute('data-value'):'unknown';
-        var want=cur==='on'?'off':'on';
-        if(dot){
-          dot.className='sh-dot '+want;
-          dot.setAttribute('data-value',want);
-          dot.setAttribute('aria-label',want==='on'?'开':'关');
-        }
         api('action=trigger&slot='+slot)
-          .then(function(){ return api('action=set_state&slot='+slot+'&state='+want); })
-          .then(function(){ say('已触发，状态已同步'); })
+          .then(function(d){ render(d); say('已触发'); })
           .catch(function(){ say('触发失败，请刷新重试',true); });
-        setTimeout(function(){refreshStates().catch(function(){});},400);
         return;
       }
       if(act==='add_alias'){
@@ -400,7 +348,7 @@ INJECT = r"""<script>
     });
 
     load().catch(function(){say('读取失败，请刷新页面',true);});
-    setInterval(function(){refreshStates().catch(function(){});},250);
+    // 状态轮询已移除：页面只在用户操作时刷新一次列表。
   }
 
   var tries=0;
@@ -408,7 +356,7 @@ INJECT = r"""<script>
     tries++;
     var a=mount(), b=styleFan(), c=styleLog();
     if((a && b && c) || tries>100) clearInterval(timer);
-  },200);
+  },50);
 })();
 </script>"""
 
@@ -472,7 +420,7 @@ def main():
         "// Patched ESPHome web_server v3 local index (ESPHome 2026.10.2).\n"
         "// Generated by gen_index.py from server_index_v3.h + injected tab.\n"
         "// Regenerate whenever the ESPHome image tag changes.\n"
-        "// 补丁：中文分组 / 风扇控件 / 无限制槽位 / 昇辉管理（副码 + 状态圆点） / 日志等高滚动 / 中文运行时长同行 / 状态 250ms 轮询。\n"
+        "// 补丁：中文分组 / 风扇控件 / 无限制槽位 / 昇辉管理（副码，无状态显示） / 日志等高滚动 / 中文运行时长同行 / 零轮询零收敛。\n"
         "#include <cstddef>\n"
         "#include <cstdint>\n"
         '#include "esphome/core/hal.h"\n'

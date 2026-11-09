@@ -106,8 +106,8 @@ inline std::string make_list() {
   return out;
 }
 
-// 状态轮询专用：只回槽位号 + 状态，不带名称 / 副码 / 射频日志。
-// 首页 250ms 高频刷新走这个接口，避免每次都拼完整 list 大 JSON。
+// 状态快照：只回槽位号 + 状态，不带名称 / 副码 / 射频日志。
+// 首页已不再轮询状态，此接口保留供外部诊断与兼容既有调用。
 inline std::string make_states() {
   std::string out = "{\"slots\":[";
   size_t count = 0;
@@ -172,10 +172,16 @@ class ApiHandler : public esphome::web_server_idf::AsyncWebHandler {
       int slot = atoi(request->arg("slot").c_str());  // 页面传 1-based 槽位 ID
       if (rf_admin::valid_slot(slot)) {
         if (action == "trigger" && api_.trigger) {
-          // RF 发射带 delay，同样交给主循环
+          // RF 发射带 delay，同样交给主循环。发射后本地翻假状态并同步 HA：
+          // 首页已去掉状态圆点与第二次 set_state 请求，一次 HTTP 全部完成。
           auto fn = api_.trigger;
+          auto set_state = api_.set_state;
           esphome::App.scheduler.set_timeout(&this->trigger_tag_, 0,
-                                             [fn, slot]() { fn(slot); });
+                                             [fn, set_state, slot]() {
+                                               fn(slot);
+                                               bool next = rf_state::flip(static_cast<uint32_t>(slot));
+                                               if (set_state) set_state(slot, next);
+                                             });
         } else if (action == "remove" && api_.remove) {
           api_.remove(slot);
           this->schedule_discovery(slot);

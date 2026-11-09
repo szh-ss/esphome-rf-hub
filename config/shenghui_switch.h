@@ -45,8 +45,9 @@ struct Runtime {
   uint32_t alias_learn_id = 0;  // 正在为哪个主槽位学习副码，0 = 空闲
   uint32_t alias_learn_start = 0;
   std::vector<LearnCandidate> learn_win;
-  // 每个槽位独立去抖：一次按压会连发多帧（含松开帧），300ms 内的后续帧
-  // 全部忽略；不同槽位互不影响，按完 A 立刻按 B 不会再被吃掉。
+  // 每个槽位独立去抖：一次按压会连发多帧（实测集中在 100ms 内），
+  // 150ms 内的后续帧全部忽略；窗口压到最短，快速连点不再被吃掉。
+  // 不同槽位互不影响，按完 A 立刻按 B 也不会被丢。
   std::map<uint32_t, uint32_t> last_detect;
   // 网页「触发」发射后只屏蔽该槽位短时间内的自收帧，别的开关照常响应。
   std::map<uint32_t, uint32_t> last_tx;
@@ -264,8 +265,8 @@ void on_packet(const std::vector<uint8_t> &x, float rssi, StatusT *status,
   }
 
   // 监听：忽略自己刚发的信号；只用基本过滤，副码可能是被严格过滤掉的帧型。
-  // 去抖改成按槽位 300ms：吃掉一次按压的重复帧 / 松开帧，但不再让
-  // 「1 秒内按第二个开关」「快速连按同一开关」被丢掉。
+  // 按槽位 150ms 去抖：只吃掉一次按压内部的重复帧 / 松开帧。
+  // 原来 300ms 会把「快速连按同一开关」误判成重复帧而丢掉。
   if (!usable) return;
 
   int found = -1;
@@ -287,9 +288,9 @@ void on_packet(const std::vector<uint8_t> &x, float rssi, StatusT *status,
     uint32_t id = static_cast<uint32_t>(found);
     uint32_t now = millis();
     auto tx = st.last_tx.find(id);
-    if (tx != st.last_tx.end() && now - tx->second < 400) return;  // 自发射回灌
+    if (tx != st.last_tx.end() && now - tx->second < 150) return;  // 自发射回灌
     auto last = st.last_detect.find(id);
-    if (last == st.last_detect.end() || now - last->second > 300) {
+    if (last == st.last_detect.end() || now - last->second > 150) {
       st.last_detect[id] = now;
       std::string nm = slot_store::name_of(id);
       ESP_LOGI("shenghui", ">>> 检测到%s 被按下（RSSI=%.1f dBm）", nm.c_str(), rssi);

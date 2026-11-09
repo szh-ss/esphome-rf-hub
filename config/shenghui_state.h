@@ -5,8 +5,9 @@
 // 昇辉 RF 单向、无状态回传，灯的开关状态由 HA 的 input_boolean 推算。
 // HA 每次状态变化会把 8 个槽位的全量状态以 retain 消息发到
 //   living-room-rf-hub/shenghui/state/all   payload: "1:on,2:off,..."
-// 设备订阅后缓存到内存；.35 首页读这份缓存显示，重启后由 broker 的
-// retain 消息自动恢复。这里只做展示与对表，不参与任何 RF 发射逻辑。
+// 设备订阅后缓存到内存；重启后由 broker 的 retain 消息自动恢复。
+// .35 首页已不再显示 / 轮询状态，这份缓存只用于 HA / 米家的状态同步，
+// 不参与任何 RF 发射逻辑。
 // ============================================================
 #include <cstdint>
 #include <cstdlib>
