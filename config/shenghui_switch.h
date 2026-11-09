@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 #include "slot_store.h"
@@ -44,8 +45,11 @@ struct Runtime {
   uint32_t alias_learn_id = 0;  // 正在为哪个主槽位学习副码，0 = 空闲
   uint32_t alias_learn_start = 0;
   std::vector<LearnCandidate> learn_win;
-  uint32_t last_detect = 0;
-  uint32_t last_tx = 0;
+  // 每个槽位独立去抖：一次按压会连发多帧（含松开帧），300ms 内的后续帧
+  // 全部忽略；不同槽位互不影响，按完 A 立刻按 B 不会再被吃掉。
+  std::map<uint32_t, uint32_t> last_detect;
+  // 网页「触发」发射后只屏蔽该槽位短时间内的自收帧，别的开关照常响应。
+  std::map<uint32_t, uint32_t> last_tx;
 };
 
 inline Runtime &runtime() {
@@ -154,7 +158,7 @@ void trigger(RadioT *radio, int slot) {
     delay(10);
   }
   radio->begin_rx();
-  runtime().last_tx = millis();
+  runtime().last_tx[static_cast<uint32_t>(slot)] = millis();
 }
 
 // ---------------- CC1101 收包：学习状态机 / 开关检测 ----------------
@@ -260,8 +264,8 @@ void on_packet(const std::vector<uint8_t> &x, float rssi, StatusT *status,
   }
 
   // 监听：忽略自己刚发的信号；只用基本过滤，副码可能是被严格过滤掉的帧型。
-  // 1 秒检测去抖会吃掉紧随其后的松开帧，不会重复翻状态。
-  if (millis() - st.last_tx < 1000) return;
+  // 去抖改成按槽位 300ms：吃掉一次按压的重复帧 / 松开帧，但不再让
+  // 「1 秒内按第二个开关」「快速连按同一开关」被丢掉。
   if (!usable) return;
 
   int found = -1;
@@ -280,9 +284,14 @@ void on_packet(const std::vector<uint8_t> &x, float rssi, StatusT *status,
     if (owner != 0 && slot_store::used(owner)) found = static_cast<int>(owner);
   }
   if (found >= 0) {
-    if (millis() - st.last_detect > 1000) {
-      st.last_detect = millis();
-      std::string nm = slot_store::name_of(static_cast<uint32_t>(found));
+    uint32_t id = static_cast<uint32_t>(found);
+    uint32_t now = millis();
+    auto tx = st.last_tx.find(id);
+    if (tx != st.last_tx.end() && now - tx->second < 400) return;  // 自发射回灌
+    auto last = st.last_detect.find(id);
+    if (last == st.last_detect.end() || now - last->second > 300) {
+      st.last_detect[id] = now;
+      std::string nm = slot_store::name_of(id);
       ESP_LOGI("shenghui", ">>> 检测到%s 被按下（RSSI=%.1f dBm）", nm.c_str(), rssi);
       status->publish_state(nm + " 被按下");
       press(found);

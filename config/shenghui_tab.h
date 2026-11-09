@@ -106,6 +106,22 @@ inline std::string make_list() {
   return out;
 }
 
+// 状态轮询专用：只回槽位号 + 状态，不带名称 / 副码 / 射频日志。
+// 首页 250ms 高频刷新走这个接口，避免每次都拼完整 list 大 JSON。
+inline std::string make_states() {
+  std::string out = "{\"slots\":[";
+  size_t count = 0;
+  for (const auto &e : slot_store::state().entries) {
+    if (!e.recorded()) continue;
+    if (count) out += ",";
+    out += "{\"slot\":" + std::to_string(e.id);
+    out += ",\"state\":\"" + std::string(rf_state::text(e.id)) + "\"}";
+    count++;
+  }
+  out += "]}";
+  return out;
+}
+
 // 接管首页 "/"：返回打过补丁的官方页面（gzip）
 class IndexHandler : public esphome::web_server_idf::AsyncWebHandler {
  public:
@@ -139,6 +155,8 @@ class ApiHandler : public esphome::web_server_idf::AsyncWebHandler {
     std::string body;
     if (action == "list") {
       body = api_.list ? api_.list() : "{\"slots\":[],\"count\":0}";
+    } else if (action == "states") {
+      body = make_states();
     } else if (action == "add") {
       // 进入学习模式会发布 text_sensor 状态，进而触发 API / SSE 广播。
       // 在 AsyncWebServer 的 HTTP 任务里直接跑会让设备重启，所以
