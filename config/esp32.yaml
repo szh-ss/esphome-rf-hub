@@ -25,7 +25,7 @@
 # 协议要点：
 #   昇辉   433.3MHz / 250k 2-FSK / 频偏 90kHz，同步字 54 21，
 #          负载 A4 23 + 8 字节码，触发时连发 4 次；学习需 1.5s 内两次相同帧
-#   风扇灯 433.92MHz / rc-switch protocol 1 / pulse 250us / 重发 40
+#   风扇灯 433.92MHz / rc-switch protocol 1 / pulse 250us / 重发 6 帧（见 substitutions）
 #   沙发   2480MHz / 1Mbps / 0dBm，地址 05 DC 03 00 00，DPL 免确认
 #
 # HA 实体：1 个风扇 + 9 个按钮（昇辉槽位另由 MQTT Discovery 动态生成）
@@ -42,6 +42,12 @@
 #   断电不丢，并通过 MQTT Discovery 同步成 HA 按钮 / 事件实体，
 #   网页里叫什么 HA 里就叫什么。
 # ============================================================
+
+substitutions:
+  # 风扇灯 433MHz 单次动作的重复帧数。每组码单帧约 39ms，接收器去抖窗口
+  # 约 300~500ms：原来的 40 帧（约 1.57s）会被当成 3~4 次按键，灯反复翻转。
+  # 6 帧约 236ms，落在去抖窗口内，同时仍有足够冗余保证解码可靠。
+  fanlight_repeat: "6"
 
 esphome:
   name: living-room-rf-hub
@@ -244,7 +250,7 @@ fan:
           code: !lambda 'return fanlight::code(fanlight::FAN_STOP);'
           carrier_frequency: 0Hz
           repeat:
-            times: 40
+            times: ${fanlight_repeat}
             wait_time: 0s
     on_speed_set:
       # x 为 HA 下发的 speed_level（1~6），只登记，不立即发射
@@ -262,7 +268,7 @@ fan:
                 code: !lambda 'return fanlight::code(static_cast<int>(x) == 0 ? fanlight::FORWARD : fanlight::REVERSE);'
                 carrier_frequency: 0Hz
                 repeat:
-                  times: 40
+                  times: ${fanlight_repeat}
                   wait_time: 0s
 
 # 滑块拖动防抖：restart 模式使每次新挡位重新计时，只有停止拖动 250ms 后
@@ -282,7 +288,7 @@ script:
                 code: !lambda 'return fanlight::code(fanlight::speed_key(id(fan_pending_speed)));'
                 carrier_frequency: 0Hz
                 repeat:
-                  times: 40
+                  times: ${fanlight_repeat}
                   wait_time: 0s
 
 button:
@@ -294,7 +300,7 @@ button:
           code: !lambda 'return fanlight::code(fanlight::LIGHT);'
           carrier_frequency: 0Hz
           repeat:
-            times: 40
+            times: ${fanlight_repeat}
             wait_time: 0s
 
   # 总关已删除；六挡 / 风扇停 / 正反转并入上方的 template fan 卡片，不再单列按钮。

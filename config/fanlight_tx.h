@@ -2,7 +2,7 @@
 // ============================================================
 // 风扇灯 433.92MHz OOK 发射码表（T2L，DAT=GPIO7）
 // 每组 66 项：正数 = 发射时长(us)，负数 = 静默时长(us)
-// rc-switch protocol 1 / pulse 250us；重发 40 次由 yaml 的 repeat 控制
+// rc-switch protocol 1 / pulse 250us；重发次数由 yaml 的 substitutions.fanlight_repeat 控制
 // 由 esp32.yaml 原样提取，未改动任何数值
 // ============================================================
 #include <cstdint>
