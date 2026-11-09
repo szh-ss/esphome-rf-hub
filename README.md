@@ -100,10 +100,19 @@ flowchart TB
 | 子系统 | 频率 / 调制 | 关键参数 |
 | --- | --- | --- |
 | 昇辉 | 433.3 MHz / 250 kbps 2-FSK | 频偏 90 kHz，同步字 `54 21`，负载 `A4 23` + 8 字节码，触发连发 4 次；接收带宽 650 kHz |
-| 风扇灯 | 433.92 MHz / OOK | rc-switch protocol 1，pulse 250 µs，重发 3 次（`substitutions.fanlight_repeat`），11 组码 |
+| 风扇灯 | 433.92 MHz / OOK | rc-switch protocol 1，pulse 250 µs，单帧 40 ms，重发帧数由 `substitutions.fanlight_repeat` 控制，11 组码 |
 | 沙发 | 2480 MHz / 1 Mbps / 0 dBm | 地址 `05 DC 03 00 00`，DPL、免确认，8 组动作帧 |
 
-> 风扇灯单帧约 39 ms。早期设 40 帧（约 1.57 s）超过接收器 300~500 ms 的去抖窗口，会被当成 3~4 次按键，表现为「点一次灯却反复切换」。现在默认 **3 帧 ≈ 118 ms**：既落在去抖窗口内，也把单次发射耗时压到最短。若接收器偶尔收不到，调到 `5`；不要超过 12。只需改 `config/esp32.yaml` 顶部这一个数。
+> 风扇灯单帧精确 40 ms，帧间无额外静默（`wait_time: 0s`）。帧数由 `config/esp32.yaml` 顶部的 `substitutions.fanlight_repeat` 单点控制。实测接收器必须收到**一组连续帧**才会解码，帧数是决定性参数：
+>
+> | 帧数 / 时长 | 现象 |
+> | --- | --- |
+> | 40 帧 / 1600 ms | 被当成 3~4 次按键，「点一次灯反复切换」 |
+> | **6 帧 / 240 ms（默认）** | 点一次触发一次，历史验证可用 |
+> | 3 帧 / 120 ms | 连点 9 次灯只动 2 次，临界不可靠 |
+> | 1 帧 / 40 ms | 连点 9 次灯 0 次响应，接收器完全不认 |
+>
+> 原装遥控器快速连按每次都响应，说明差异不在接收器冷却期，而在 **ESP32 拼出的帧流结构**（帧数 / 帧间隙 / 结束帧）。要继续优化必须先抓原装波形比对，不要再盲调帧数。
 
 ---
 
@@ -307,8 +316,8 @@ Lovelace 注册 `shenghui-status` /「昇辉灯状态」，指向 `shenghui_dash
 
 - HA 侧那条「餐厅开关 → 风扇灯」自动化必须**删除**，否则会重复发射一次。
 - 槽位 4 的三条入口（物理按压 / `.35` 网页「触发」/ HA MQTT 按钮）统一走 `fanlight_light_button`，都发 LIGHT 码，不再发灯不认的墙壁开关码。
-- 配合 3 帧短 burst（单帧 40 ms，共 120 ms）、按槽 150 ms 去抖、150 ms 自收屏蔽，单次按压到灯响应只剩射频发射时间。`fanlight_light_button` 的 `on_press` 会打一条 INFO 日志 `LIGHT 码发射一次`，可在 .35 调试日志里直接数设备实际发射了几次。
-- 首页一次操作只发一个 HTTP 请求：设备发射完就结束，没有 `flip()`、没有 `state/set`、没有状态圆点、250 ms 轮询或 400 ms 收敛。`/sw/api?action=trigger` 为每次请求分配独立的 scheduler tag——ESPHome 的 `set_timeout` 会取消同 tag 的旧任务，固定 tag 会把 120 ms 发射阻塞期间的快速连点合并成一次（实测点十几次只发一两次）。
+- 配合短 burst（单帧 40 ms，帧数见 `substitutions.fanlight_repeat`）、按槽 150 ms 去抖、150 ms 自收屏蔽，单次按压到灯响应只剩射频发射时间。`fanlight_light_button` 的 `on_press` 会打一条 INFO 日志 `LIGHT 码发射一次`，可在 .35 调试日志里直接数设备实际发射了几次。
+- 首页一次操作只发一个 HTTP 请求：设备发射完就结束，没有 `flip()`、没有 `state/set`、没有状态圆点、250 ms 轮询或 400 ms 收敛。`/sw/api?action=trigger` 为每次请求分配独立的 scheduler tag——ESPHome 的 `set_timeout` 会取消同 tag 的旧任务，固定 tag 会把发射阻塞主循环期间的快速连点合并成一次（实测点十几次只发一两次）。
 
 ---
 
