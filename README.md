@@ -310,7 +310,23 @@ Lovelace 注册 `shenghui-status` /「昇辉灯状态」，指向 `shenghui_dash
 
 **4. 小爱语音**
 
-通过 `bemfa_cloud` 集成把 8 个 `template switch` 同步为巴法云主题。云端会把一次点按回显成一串命令，集成内的 `tcp.py` 只按时间窗合并这串回显，不分辨 on / off、不比较 HA 状态。注意该集成的选项流「修改同步」**只会改 HA 本地配置**，云端改名要另调 `https://apis.bemfa.com/va/modifyName`；米家 / 小爱侧还有缓存，通常要解绑重加才会用新名字。另外米家「其他平台设备」不会在首页生成设备卡片，只能语音控制。
+通过 `bemfa_cloud` 集成把 8 个灯的 `template switch` 同步为巴法云开关主题（后缀 `006`）。云端会把一次点按回显成一串命令，集成内的 `tcp.py` 只按时间窗合并这串回显，不分辨 on / off、不比较 HA 状态。注意该集成的选项流「修改同步」**只会改 HA 本地配置**，云端改名要另调 `https://apis.bemfa.com/va/modifyName`；米家 / 小爱侧还有缓存，通常要解绑重加才会用新名字。另外米家「其他平台设备」不会在首页生成设备卡片，只能语音控制。
+
+**沙发必须包一层 `script`**：8 个沙发动作是 `button` 实体，而巴法集成不支持 `button` 域（它只收 `switch` / `script` / `input_boolean` / `automation` / `light` / `fan` / `cover` / `climate` 等，兜底逻辑也只挑同时有 `turn_on` + `turn_off` 服务的实体）。所以 `scripts.yaml` 里给每个动作写一个只转发一次的脚本：
+
+```yaml
+sofa_1_out:
+  alias: 沙发一移出
+  mode: single
+  sequence:
+    - action: button.press
+      target:
+        entity_id: button.ke_ting_rf_zhong_shu_sha_fa_yi_yi_chu_02
+```
+
+共 8 个：`sofa_1_out/in`、`sofa_2_out/in`、`sofa_3_out/in`、`sofa_all_out/in`，名称依次是「沙发一移出 / 移回 … 沙发全部移出 / 移回」。巴法把 `script` 映射成开关：云端 `on` → `script.turn_on` → 按一次按钮 → 发射一次 60 帧 nRF24；云端 `off` → `script.turn_off`，脚本已结束、无动作。因此云端 `on/off/on` 回显不会让沙发连动三次，也不需要任何状态判断。
+
+添加方式：集成「配置 → 批量添加同步」勾选这 8 个 `script`，保存后**单独重载该集成**（不要 `reload_all`，会打断 TCP 长连接）。日志里 `Bemfa TCP subscribe topics` 应出现 8 个新主题，`service._ensure_topics()` 会自动调巴法 API 创建云端主题。语音说「打开沙发一移出」即可；「关闭」不触发动作，因为动作型设备没有「关」。
 
 ---
 
@@ -340,6 +356,7 @@ Lovelace 注册 `shenghui-status` /「昇辉灯状态」，指向 `shenghui_dash
 
 - **RF 单向无回传、切换型灯**：没有状态可维护，米家 / 小爱显示的开 / 关只是 HA 乐观值，可能与灯的实际状态不一致。说「打开」和「关闭」都会让灯切换一次，这是设计使然；需要绝对开 / 关语义就必须换成有回传的灯具。
 - **巴法云端回显**：一次点按会被云端回显成一串命令，集成按固定 5 秒静默窗合并；间隔落在 2~5 秒的连续两次点按，第二次可能被合并掉。物理开关 / 网页 / HA 按钮链路完全不经过这一层。
+- **沙发语音只有「打开」有效**：动作型 `script` 没有「关」，说「关闭沙发一移出」不会动作；要收回就说「打开沙发一移回」。
 - **风扇卡片是乐观状态**：`restore_mode: NO_RESTORE`，用原装遥控器改挡不会同步回来。不要用 `ALWAYS_OFF`——它只把 `state` 强制为 false，`speed` / `direction` 仍会从 Flash 恢复，`setup()` 里的 `publish_state()` 会误触发 `on_speed_set` / `on_direction_set`，导致每次上电都发一组 RF 把风扇点转。`on_direction_set` 另有 `state` 保护，风扇关着时不下发方向码；首页的「正转 / 反转」按钮不走这条触发器，直接由 script 发码，因此关着风扇也能换方向。
 - **槽位 ID 删除后留空洞**，这是为了让 HA 实体 / topic / 自动化绑定保持稳定，不是 bug。
 - **`gen_index.py` 与 ESPHome 版本强绑定**：官方首页的压缩 JS 一变，精确替换就会失败并报错，需重新对照生成。
