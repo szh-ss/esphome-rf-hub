@@ -36,10 +36,12 @@
 #
 # HA 实体：1 个风扇 + 9 个按钮（昇辉槽位另由 MQTT Discovery 动态生成）
 #   文本传感器 sw_status 设为 internal: true，只作内部提示，不注册到 HA。
-#   风扇灯改为官方 template fan：6 挡速度滑块 + 正反转方向 + 开关（停），
-#   只保留「风扇灯开关」一个独立按钮；挡位/方向/停都由 fan 触发器发射。
-#   标签全部使用中文，并带连续编号保证同平台内 ASCII 实体 ID 唯一：
-#     按钮 01     风扇灯开关
+#   433MHz 那套硬件仍是风扇灯，但按房间习惯拆成两个静态显示实体：
+#     风扇       官方 template fan：6 挡速度滑块 + 正反转方向 + 开关（停）
+#     厨房灯 01  独立按钮，只发 LIGHT 码；槽位 4 的昇辉物理开关本地直接按它
+#   挡位/方向/停都由 fan 触发器发射。标签全部使用中文，按钮带连续编号
+#   保证同平台内 ASCII 实体 ID 唯一：
+#     按钮 01     厨房灯
 #     按钮 02~09  沙发一/二/三移出移回、沙发全部移出 / 沙发全部移回
 #   昇辉开关不再有固定房间按钮，也没有固定房间名：统一在 ESP32 首页
 #   「昇辉开关管理」区块里填名称后点「添加昇辉控股开关」录入，录入后才
@@ -87,7 +89,7 @@ esphome:
       # shenghui_mqtt.h 内部会用 scheduler 推迟到主循环。
       - lambda: |-
           shenghui_mqtt::device().set_trigger([](int slot) {
-            // 槽位 4（餐厅灯）实际控制的是风扇灯照明，只认 LIGHT 码。
+            // 槽位 4（餐厅灯）实际控制的是「厨房灯 01」那路照明，只认 LIGHT 码。
             // HA 的 MQTT 按钮、网页「触发」、物理按压三条路径统一走这里。
             if (slot == 4) id(fanlight_light_button).press();
             else shenghui::trigger(id(rf_cc1101), slot);
@@ -239,10 +241,10 @@ cc1101:
         shenghui::on_packet(x, rssi, id(sw_status),
           [](int slot) { shenghui_mqtt::device().publish_slot(slot); },
           [](int slot) {
-            // 槽位 4 = 餐厅灯的物理昇辉开关，它控制的是风扇灯的照明。
-            // 直接在本机发 LIGHT 码，省掉「MQTT → HA 自动化 → API 回设备」
-            // 这一整圈（实测约 1 秒）。HA 里那条「餐厅开关 → 风扇灯」
-            // 自动化必须删掉，否则会重复发射一次。
+            // 槽位 4 = 餐厅灯的物理昇辉开关，它控制的是「厨房灯 01」那路
+            // 照明（LIGHT 码）。直接在本机发码，省掉「MQTT → HA 自动化
+            // → API 回设备」这一整圈（实测约 1 秒）。HA 里那条
+            // 「餐厅开关 → 风扇灯」旧自动化必须删掉，否则会重复发射一次。
             if (slot == 4) {
               id(fanlight_light_button).press();
               // 发射本身约 118ms：完成后刷新时间戳，避免同一次按压剩下的
@@ -258,7 +260,7 @@ remote_transmitter:
   pin: 7
   carrier_duty_percent: 100%
 
-# ---------------- 风扇灯：HA 风扇卡片（6 挡滑块 + 正反转 + 开关） ----------------
+# ---------------- 风扇：HA 风扇卡片（6 挡滑块 + 正反转 + 开关） ----------------
 # 底层仍是 6 组互不相关的 RF 码，滑块只是把 1~6 挡映射到对应那一组码。
 # RF 单向发射无回传，卡的开关/挡位属乐观状态，禁止跨断电恢复（NO_RESTORE）。
 # 坑：ALWAYS_OFF 只把 state 强制成 false，speed / direction 仍从 Flash 恢复，
@@ -269,7 +271,7 @@ remote_transmitter:
 # 用原装遥控器改挡不会同步回来。
 fan:
   - platform: template
-    name: "风扇灯"
+    name: "风扇"
     id: fanlight_fan
     speed_count: 6
     has_direction: true
@@ -351,9 +353,9 @@ script:
             wait_time: 0s
 
 button:
-  # ---------------- 风扇灯独立动作（不属风扇卡片，码表见 fanlight_tx.h） ----------------
+  # ---------------- 厨房灯：独立 LIGHT 码按钮（不属风扇卡片，码表见 fanlight_tx.h） ----------------
   - platform: template
-    name: "风扇灯开关 01"
+    name: "厨房灯 01"
     id: fanlight_light_button
     on_press:
       # 可观测：每次真正发射 LIGHT 码都留一条 INFO 日志，便于区分
