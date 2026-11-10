@@ -42,6 +42,7 @@ struct Api {
   std::function<void(int)> sync;                           // 同步该槽位到 HA MQTT discovery
   std::function<void(int)> add_alias;                      // 给该槽位学习一个副码（双控）
   std::function<void(int)> remove_alias;                  // 清除该槽位的全部副码
+  std::function<void(bool)> fan_direction;                // 首页风扇卡片：true=正转 / false=反转
 };
 
 // JSON 字符串转义（UTF-8 中文原样保留）
@@ -185,6 +186,24 @@ class ApiHandler : public esphome::web_server_idf::AsyncWebHandler {
         }
       }
       body = api_.list ? api_.list() : "{\"slots\":[],\"count\":0}";
+    } else if (action == "fan_dir") {
+      // 官方 web_server 的 fan REST 不解析 direction，SSE 也不下发方向，
+      // 因此首页方向按钮走本接口，直接按码表发一次正转 / 反转 RF。
+      // 不做任何状态判断：风扇开着关着都能发，也不回写风扇卡片状态。
+      std::string dir = request->arg("dir");
+      bool ok = (dir == "forward" || dir == "reverse");
+      if (ok && api_.fan_direction) {
+        bool forward = dir == "forward";
+        auto fn = api_.fan_direction;
+        // 发射会阻塞主循环约 240ms，且每次请求都用独立 tag，
+        // 快速连点不会被 scheduler 合并（同 tag 会取消旧任务）。
+        auto *tag = new uint32_t(0);
+        esphome::App.scheduler.set_timeout(tag, 0, [fn, forward, tag]() {
+          delete tag;
+          fn(forward);
+        });
+      }
+      body = std::string("{\"ok\":") + (ok ? "true" : "false") + "}";
     } else {
       body = "{\"slots\":[],\"count\":0}";
     }

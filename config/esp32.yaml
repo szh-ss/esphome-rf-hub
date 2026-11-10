@@ -113,6 +113,12 @@ esphome:
             // 副码学习 / 清除：不产生新槽位，HA 实体与自动化不变。
             [](int slot) { rf_admin::alias_learn_start(id(sw_status), slot); },
             [](int slot) { rf_admin::alias_clear(slot); },
+            // 首页风扇卡片的「正转 / 反转」：官方 fan REST 不支持方向参数，
+            // 由 /sw/api 调用这两个纯发射 script（不建任何实体）。
+            [](bool forward) {
+              if (forward) id(fan_emit_forward).execute();
+              else id(fan_emit_reverse).execute();
+            },
           });
 
 esp32:
@@ -319,6 +325,31 @@ script:
                   times: ${fanlight_repeat}
                   wait_time: 0s
 
+  # 首页风扇卡片的「正转 / 反转」：官方 fan REST 不解析 direction、SSE 也
+  # 不下发方向，所以由 /sw/api 调这两个 script 直接按码表发一次 RF。
+  # 用 script 而不是 button：不产生任何 ESPHome / MQTT 实体，界面也不会单列。
+  # queued 保证快速连点每次都发，不会被 single 模式吞掉。
+  - id: fan_emit_forward
+    mode: queued
+    then:
+      - lambda: 'ESP_LOGI("fanlight", "正转码发射一次");'
+      - remote_transmitter.transmit_raw:
+          code: !lambda 'return fanlight::code(fanlight::FORWARD);'
+          carrier_frequency: 0Hz
+          repeat:
+            times: ${fanlight_repeat}
+            wait_time: 0s
+  - id: fan_emit_reverse
+    mode: queued
+    then:
+      - lambda: 'ESP_LOGI("fanlight", "反转码发射一次");'
+      - remote_transmitter.transmit_raw:
+          code: !lambda 'return fanlight::code(fanlight::REVERSE);'
+          carrier_frequency: 0Hz
+          repeat:
+            times: ${fanlight_repeat}
+            wait_time: 0s
+
 button:
   # ---------------- 风扇灯独立动作（不属风扇卡片，码表见 fanlight_tx.h） ----------------
   - platform: template
@@ -336,6 +367,7 @@ button:
             wait_time: 0s
 
   # 总关已删除；六挡 / 风扇停 / 正反转并入上方的 template fan 卡片，不再单列按钮。
+  # 方向发射入口在 script 区，不在这里建实体。
   # 昇辉开关已改为首页「昇辉开关管理」区块动态录入，不再有固定房间按钮。
 
   # ---------------- 电动沙发：nRF24 8 动作（帧表见 sofa_rf_s3.h） ----------------
