@@ -31,6 +31,8 @@
 #          负载 A4 23 + 8 字节码，触发时连发 4 次；学习需 1.5s 内两次相同帧
 #   风扇灯 433.92MHz / rc-switch protocol 1 / pulse 250us / 重发帧数见 substitutions
 #   沙发   2480MHz / 1Mbps / 0dBm，地址 05 DC 03 00 00，DPL 免确认
+#          W_TX_PAYLOAD_NOACK(0xB0) / 60 帧 / 5ms 间隔 / 整段 300ms
+#          （照抄原装遥控器 SPI 抓包，详见 sofa_rf_s3.h）
 #
 # HA 实体：1 个风扇 + 9 个按钮（昇辉槽位另由 MQTT Discovery 动态生成）
 #   文本传感器 sw_status 设为 internal: true，只作内部提示，不注册到 HA。

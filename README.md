@@ -101,7 +101,7 @@ flowchart TB
 | --- | --- | --- |
 | 昇辉 | 433.3 MHz / 250 kbps 2-FSK | 频偏 90 kHz，同步字 `54 21`，负载 `A4 23` + 8 字节码，触发连发 4 次；接收带宽 650 kHz |
 | 风扇灯 | 433.92 MHz / OOK | rc-switch protocol 1，pulse 250 µs，单帧 40 ms，重发帧数由 `substitutions.fanlight_repeat` 控制，11 组码 |
-| 沙发 | 2480 MHz / 1 Mbps / 0 dBm | 地址 `05 DC 03 00 00`，DPL、免确认，8 组动作帧 |
+| 沙发 | 2480 MHz / 1 Mbps / 0 dBm | 地址 `05 DC 03 00 00`，DPL，`W_TX_PAYLOAD_NOACK (0xB0)` 免确认包，每动作 60 帧 / 5 ms 间隔 / 整段 300 ms，8 组动作帧 |
 
 > 风扇灯单帧精确 40 ms，帧间无额外静默（`wait_time: 0s`）。帧数由 `config/esp32.yaml` 顶部的 `substitutions.fanlight_repeat` 单点控制。实测接收器必须收到**一组连续帧**才会解码，帧数是决定性参数：
 >
@@ -113,6 +113,10 @@ flowchart TB
 > | 1 帧 / 40 ms | 连点 9 次灯 0 次响应，接收器完全不认 |
 >
 > 原装遥控器快速连按每次都响应，说明差异不在接收器冷却期，而在 **ESP32 拼出的帧流结构**（帧数 / 帧间隙 / 结束帧）。要继续优化必须先抓原装波形比对，不要再盲调帧数。
+
+> **沙发发射严格照抄原装遥控器**：原始逻辑分析仪抓包（24 MHz / 8 通道，`开关资料/电动沙发/sr/*.sr`）解出每帧 6 个 CSN 事务：`20 00`（CONFIG=0x00 掉电）→ `E1`（FLUSH_TX）→ `B0 + 8 字节`（W_TX_PAYLOAD_NOACK）→ `20 0E`（CONFIG=0x0E 上电，原装 CE 恒高，靠这次上电触发发送）→ 轮询 STATUS → `27 2E` 清 TX_DS。相邻帧起始间隔实测 4.91 / 5.05 / 5.01 ms，60 帧整段约 297 ms；抓到的首帧 `01 15 10 00 00 00 00 26` 与 `cmd1o[0]` 完全一致，**码表本身无误**。
+>
+> 移植版曾有三处偏差，导致 8 个沙发动作全部无反应：用 `0xA0`（普通 payload）而非 `0xB0`、用 CE 脉冲触发而非 CONFIG 上下电、帧间隔 `delay(20)` 而非 5 ms（整段被拖成 1.2 s）。修正后单次发射实测 **300 ms / TX_DS 零超时**，寄存器自检也确认 nRF24 在线（CONFIG=0x0E、CH=0x50、RF_SETUP=0x07、AW=0x03、FEATURE=0x05、ADDR0=0x05）。`sofa_rf_s3.h` 保留自检与发射完成日志，便于在 .35 调试日志里区分「模块没接好 / 帧没发出去 / 接收器没认」。
 
 ---
 
@@ -128,7 +132,7 @@ flowchart TB
 │   ├── .gitignore              # Device Builder 本地状态与密钥的忽略规则
 │   ├── esp32.yaml              # 唯一的主配置：声明式实体 + includes + on_boot 装配
 │   ├── secrets.yaml.example    # 密钥模板（真实 secrets.yaml 不入库）
-│   ├── sofa_rf_s3.h            # nRF24 软件 SPI + 沙发 8 帧
+│   ├── sofa_rf_s3.h            # nRF24 软件 SPI + 沙发 8 组动作帧表（照抄原装 SPI 抓包）
 │   ├── fanlight_tx.h           # 风扇灯 11 组 OOK 码表 + 挡位映射
 │   ├── slot_store.h            # 变长 NVS blob：槽位 + 副码 + 旧 8 槽迁移
 │   ├── shenghui_switch.h       # CC1101 收包 / 学习状态机 / 去重 / 触发

@@ -26,7 +26,9 @@
 #define NREG_FEATURE     0x1D
 #define NCMD_WREG        0x20
 #define NCMD_FLUSH_TX    0xE1
-#define NCMD_W_TX_PAYLOAD 0xA0
+// 原装遥控器用 W_TX_PAYLOAD_NOACK（免确认包）。原始 SPI 抓包里每帧命令是
+// B0，不是 A0；FEATURE 中的 EN_DYN_ACK(bit0) 正是为这条命令开的。
+#define NCMD_W_TX_PAYLOAD_NOACK 0xB0
 #define NCMD_NOP         0xFF
 
 // ---------- 软件 SPI（GPIO 模拟，CPOL=0/CPHA=0，MSB first）----------
@@ -77,24 +79,44 @@ static void nrf_writeAddr(uint8_t reg, uint64_t addr) {
   for (int i = 0; i < 5; i++) sofa_spi_rw((uint8_t)(addr >> (8 * i)));
   nrf_cs(HIGH);
 }
-static void nrf_sendFrame(const uint8_t* data, uint8_t len) {
-  nrf_writeReg(NREG_STATUS, 0x70);          // 清 TX_DS / MAX_RT
+// 完全照抄原装遥控器的一次按键帧序列（24 MHz 逻辑分析仪抓包
+// 「电动沙发/sr/1号沙发移出.sr」，每帧 6 个 CSN 事务，共 60 帧）：
+//   20 00        写 CONFIG=0x00（掉电）
+//   E1           FLUSH_TX
+//   B0 <8 bytes> W_TX_PAYLOAD_NOACK，免确认包
+//   20 0E        写 CONFIG=0x0E（上电 TX；原装 CE 恒高，靠这次上电触发发送）
+//   07 FF        轮询 STATUS
+//   27 2E        清 TX_DS
+// 原实现有两处偏差：用 A0 普通 payload、用 CE 脉冲触发，且帧间隔 20ms。
+static bool nrf_sendFrame(const uint8_t* data, uint8_t len) {
+  nrf_writeReg(NREG_CONFIG, 0x00);          // 掉电
   nrf_cs(LOW); sofa_spi_rw(NCMD_FLUSH_TX); nrf_cs(HIGH);
   nrf_cs(LOW);
-  sofa_spi_rw(NCMD_W_TX_PAYLOAD);
+  sofa_spi_rw(NCMD_W_TX_PAYLOAD_NOACK);
   for (int i = 0; i < len; i++) sofa_spi_rw(data[i]);
   nrf_cs(HIGH);
-  digitalWrite(SOFA_CE, HIGH);              // CE 脉冲 >10us 触发发送
-  delayMicroseconds(20);
-  digitalWrite(SOFA_CE, LOW);
+  nrf_writeReg(NREG_CONFIG, 0x0E);          // 上电即发送（CE 由 sofa_send 置高）
   uint32_t t0 = millis();
-  while (millis() - t0 < 1000) {
-    if (nrf_readReg(NREG_STATUS) & 0x20) {  // 等待 TX_DS
-      nrf_writeReg(NREG_STATUS, 0x20);
-      break;
+  while (millis() - t0 < 50) {              // 空中时间 <1ms，50ms 足够
+    if (nrf_readReg(NREG_STATUS) & 0x20) {  // TX_DS
+      nrf_writeReg(NREG_STATUS, 0x2E);      // 照抄原装的中断清除值
+      return true;
     }
     delay(1);
   }
+  return false;
+}
+
+// 读回一组寄存器用于自检。SPI 正常时 CONFIG=0x0E、RF_CH=0x50、
+// RF_SETUP=0x07、AW=0x03、TX_ADDR 首字节=0x05；全 0x00 / 0xFF 说明
+// 模块没接好或供电不足，MISO 恒定电平。
+static void nrf_dump(const char* stage) {
+  ESP_LOGI("sofa", "[%s] CONFIG=0x%02X CH=0x%02X RF_SETUP=0x%02X AW=0x%02X STATUS=0x%02X FIFO=0x%02X FEATURE=0x%02X ADDR0=0x%02X",
+           stage,
+           nrf_readReg(NREG_CONFIG), nrf_readReg(NREG_RF_CH),
+           nrf_readReg(NREG_RF_SETUP), nrf_readReg(NREG_SETUP_AW),
+           nrf_readReg(NREG_STATUS), nrf_readReg(NREG_FIFO_STATUS),
+           nrf_readReg(NREG_FEATURE), nrf_readReg(NREG_RX_ADDR_P0));
 }
 
 // ---------- 简易字符串比较（避免依赖 <cstring>）----------
@@ -663,6 +685,7 @@ void sofa_init() {
   nrf_cs(LOW); sofa_spi_rw(NCMD_FLUSH_TX); nrf_cs(HIGH);
   nrf_writeReg(NREG_CONFIG, 0x0E);     // PWR_UP | PRIM_TX | EN_CRC | CRCO
   delay(5);
+  nrf_dump("init");
 }
 
 // name: r1o r1i r2o r2i r3o r3i rao rai
@@ -677,5 +700,34 @@ void sofa_send(const char* name) {
   else if (sofa_strcmp(name,"rao")==0){d=cmdao;len=cmdao_len;}
   else if (sofa_strcmp(name,"rai")==0){d=cmdai;len=cmdai_len;}
   else return;
-  for (int i=0;i<len;i++){ nrf_sendFrame(d[i],8); delay(20); }
+
+  // 每次动作都先自检一次：无论从 .35 首页、HA 还是别处触发，日志里都能
+  // 直接看到 nRF24 是否在线，不用特意抓开机日志。
+  nrf_dump(name);
+  ESP_LOGI("sofa", "开始发射 %s：%d 帧", name, len);
+  int timeouts = 0, consecutive = 0;
+  // 抓包实测相邻帧的起始间隔 4.91 / 5.05 / 5.01 ms，60 帧整段约 297 ms。
+  // 原实现用 delay(20) 把整段拖到 1.2 s，是接收器不动作的另一个关键偏差。
+  digitalWrite(SOFA_CE, HIGH);           // 原装 CE 恒高，靠 CONFIG 上下电触发
+  uint32_t t0 = millis();
+  bool aborted = false;
+  for (int i = 0; i < len; i++) {
+    if (nrf_sendFrame(d[i], 8)) {
+      consecutive = 0;
+    } else {
+      timeouts++;
+      if (++consecutive >= 3) {          // 模块异常时立即收手，不拖垮主循环
+        ESP_LOGE("sofa", "%s 发射中止：连续 3 帧未等到 TX_DS（第 %d 帧），请检查 nRF24 接线 / 3V3 供电", name, i + 1);
+        aborted = true;
+        break;
+      }
+    }
+    // 按 5 ms 周期补足（扣掉本帧 SPI + 发射耗时），严格复刻原装节奏
+    uint32_t target = (uint32_t)(i + 1) * 5;   // 相对 t0 的 5ms 周期
+    while (millis() - t0 < target) delay(1);
+  }
+  digitalWrite(SOFA_CE, LOW);
+  if (!aborted)
+    ESP_LOGI("sofa", "%s 发射完成：%d 帧，耗时 %u ms，TX_DS 超时 %d 次",
+             name, len, (unsigned)(millis() - t0), timeouts);
 }
